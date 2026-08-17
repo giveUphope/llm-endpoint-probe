@@ -70,6 +70,17 @@ code, pre { font-family: "Cascadia Code", Consolas, monospace; }
 .toggle-row small { margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.4; }
 .warning-toggle { border-color: #ead9ba; background: #fffaf0; }
 .storage-note { margin: 12px 0; padding-left: 9px; border-left: 3px solid #e1ab45; color: #6c5a39; font-size: 10px; line-height: 1.5; }
+.provider-detection { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: start; gap: 7px; margin: -3px 0 11px; padding: 9px; border: 1px solid #a8d6d0; border-radius: 5px; color: #155d57; background: #eef9f7; }
+.provider-detection strong, .provider-detection small { display: block; }
+.provider-detection strong { font-size: 11px; }
+.provider-detection small { margin-top: 2px; color: #57716f; font-size: 9px; line-height: 1.4; }
+.provider-support { display: inline-block; margin-left: 6px; padding: 1px 4px; border: 1px solid #8dc8c0; border-radius: 3px; font-size: 8px; font-weight: 600; }
+.provider-limited { border-color: #e2c078; color: #71500f; background: #fff8e8; }
+.provider-limited small { color: #715f3b; }
+.provider-limited .provider-support { border-color: #d4a94d; }
+.compact-button { min-height: 27px; padding: 0 8px; font-size: 10px; white-space: nowrap; }
+.inline-notice { margin: -5px 0 10px; padding-left: 8px; border-left: 2px solid var(--accent); color: #52666a; font-size: 9px; line-height: 1.45; }
+.warning-notice { border-color: #d99524; color: #72541e; }
 .panel-actions { display: grid; grid-template-columns: 1fr 32px 32px; gap: 6px; margin-bottom: 8px; }
 .secondary-button, .primary-button, .validate-button { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 11px; border-radius: 4px; font-weight: 600; font-size: 12px; }
 .secondary-button { color: #334047; background: #fff; border: 1px solid var(--line); }
@@ -166,7 +177,7 @@ code, pre { font-family: "Cascadia Code", Consolas, monospace; }
 .last-request pre { max-height: 150px; overflow: auto; margin: 0; padding: 8px; border: 1px solid var(--soft-line); background: #f2f5f6; font-size: 9px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .probe-log { min-height: 0; overflow: auto; padding: 16px; background: #fbfcfc; }
-.timeline { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); border: 1px solid var(--line); background: white; }
+.timeline { display: grid; grid-template-columns: repeat(5, minmax(105px, 1fr)); overflow-x: auto; border: 1px solid var(--line); background: white; }
 .timeline-step { min-height: 75px; display: grid; grid-template-columns: 24px 1fr; gap: 5px; padding: 12px; border-right: 1px solid var(--line); }
 .timeline-step:last-child { border-right: 0; }
 .timeline-step strong, .timeline-step small { display: block; }

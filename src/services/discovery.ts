@@ -12,12 +12,14 @@ import type {
   ProxyResponse,
   RequestRecord,
 } from '../domain/types';
-import { buildAuthHeaders, redactHeaders, redactText, sanitizeData } from '../lib/security';
+import { buildAuthHeaders, mergeHeaders, normalizeApiKey, redactHeaders, redactText, sanitizeData } from '../lib/security';
+import { detectProvider } from '../lib/providers';
 import { normalizeBaseURL, pairsToRecord, uid } from '../lib/profile';
 import { authorizeEndpoint, ProbeError, proxyRequest } from './proxy';
 
 const stepDefinitions = [
   ['connectivity', '连通性检查'],
+  ['authentication', '认证诊断'],
   ['protocol', '协议识别'],
   ['models', '模型列表发现'],
   ['capabilities', '能力归一化'],
@@ -45,6 +47,11 @@ function outputContent(data: unknown): unknown {
   const firstChoice = record(choices[0]);
   const message = record(firstChoice?.message) ?? record(root?.message);
   if (message?.content != null) return message.content;
+  const candidates = Array.isArray(root?.candidates) ? root.candidates : [];
+  const candidateParts = Array.isArray(record(record(candidates[0])?.content)?.parts)
+    ? record(record(candidates[0])?.content)?.parts as unknown[]
+    : [];
+  if (candidateParts.length) return candidateParts;
   if (typeof root?.output_text === 'string') return root.output_text;
   const output = Array.isArray(root?.output) ? root.output : [];
   for (const item of output) {
@@ -62,6 +69,11 @@ function hasToolCall(data: unknown): boolean {
   const choices = Array.isArray(root?.choices) ? root.choices : [];
   const message = record(record(choices[0])?.message) ?? record(root?.message);
   if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) return true;
+  const candidates = Array.isArray(root?.candidates) ? root.candidates : [];
+  const candidateParts = Array.isArray(record(record(candidates[0])?.content)?.parts)
+    ? record(record(candidates[0])?.content)?.parts as unknown[]
+    : [];
+  if (candidateParts.some((item) => Boolean(record(item)?.functionCall))) return true;
   const content = Array.isArray(root?.content) ? root.content : [];
   const output = Array.isArray(root?.output) ? root.output : [];
   return [...content, ...output].some((item) => ['tool_use', 'function_call'].includes(String(record(item)?.type)));
@@ -74,6 +86,42 @@ function isJsonOutput(data: unknown): boolean {
     : Array.isArray(content) ? content.map((item) => typeof item === 'string' ? item : String(record(item)?.text ?? '')).join('') : '';
   if (!text) return false;
   try { return Boolean(JSON.parse(text)); } catch { return false; }
+}
+
+function upstreamErrorMessage(data: unknown): string | undefined {
+  const root = record(data);
+  const nested = record(root?.error);
+  const message = nested?.message ?? root?.message ?? root?.detail;
+  return typeof message === 'string' ? message.slice(0, 240) : undefined;
+}
+
+export function summarizeResponse(data: unknown): unknown {
+  const root = record(data);
+  if (!root) return data;
+  for (const key of ['data', 'models']) {
+    const items = root[key];
+    if (Array.isArray(items) && items.length > 3) {
+      return { ...root, [key]: items.slice(0, 3), totalItems: items.length, truncated: true };
+    }
+  }
+  return data;
+}
+
+export function describeHttpFailure(status: number, data: unknown, profile: EndpointProfile): string {
+  const provider = detectProvider(profile.baseURL);
+  const providerMessage = upstreamErrorMessage(data);
+  const key = normalizeApiKey(profile.apiKey, profile.authMode);
+  let guidance = `HTTP ${status}`;
+  if (status === 401) {
+    guidance = !key || profile.authMode === 'none'
+      ? `HTTP 401：${provider?.label ?? '端点'}需要认证，请选择正确的认证方式并填写 API Key`
+      : `HTTP 401：${provider?.label ?? '端点'}拒绝了认证，请确认 API Key 有效、未过期且 Header 模式正确`;
+  } else if (status === 403) {
+    guidance = `HTTP 403：认证已到达端点，但当前密钥或账号没有访问权限`;
+  } else if (status === 429) {
+    guidance = 'HTTP 429：请求受到限流或账户配额不足';
+  }
+  return providerMessage ? `${guidance}；服务端：${providerMessage}` : guidance;
 }
 
 export function evaluateValidation(capability: CapabilityKey, response: ProxyResponse): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
@@ -105,11 +153,18 @@ function updateStep(run: DiscoveryRun, id: string, patch: Partial<DiscoveryStep>
   if (step) Object.assign(step, patch);
 }
 
-function headersFor(profile: EndpointProfile): Record<string, string> {
-  return {
-    ...buildAuthHeaders(profile.authMode, profile.apiKey, profile.customHeaderName, profile.customHeaderTemplate),
-    ...pairsToRecord(profile.headers),
-  };
+export function headersFor(profile: EndpointProfile): Record<string, string> {
+  const additional = pairsToRecord(profile.headers);
+  const managedHeader = profile.authMode === 'bearer'
+    ? 'authorization'
+    : profile.authMode === 'api-key' ? 'api-key' : profile.authMode === 'custom' ? profile.customHeaderName.trim().toLowerCase() : '';
+  const filteredAdditional = managedHeader
+    ? Object.fromEntries(Object.entries(additional).filter(([name]) => name.trim().toLowerCase() !== managedHeader))
+    : additional;
+  return mergeHeaders(
+    filteredAdditional,
+    buildAuthHeaders(profile.authMode, profile.apiKey, profile.customHeaderName, profile.customHeaderTemplate),
+  );
 }
 
 function publicURL(profile: EndpointProfile, path: string): string {
@@ -126,8 +181,8 @@ async function makeRequest(
   onUpdate: RunUpdate,
 ) {
   const id = uid();
-  const headers = { ...headersFor(profile), ...request.headers };
-  const secrets = [profile.apiKey].filter(Boolean);
+  const headers = mergeHeaders(headersFor(profile), request.headers);
+  const secrets = [profile.apiKey, normalizeApiKey(profile.apiKey, profile.authMode)].filter(Boolean);
   const record: RequestRecord = {
     id,
     stepId,
@@ -168,12 +223,13 @@ async function makeRequest(
     record.finalURL = response.finalURL;
     record.durationMs = response.durationMs;
     record.responseBytes = response.responseBytes;
-    record.responsePreview = sanitizeData(response.data, secrets);
+    record.responsePreview = sanitizeData(summarizeResponse(response.data), secrets);
     if (!response.ok) {
       const errorType = ((response as unknown as { errorType?: ProbeErrorType }).errorType || 'network');
+      const message = describeHttpFailure(response.status, response.data, profile);
       record.errorType = errorType;
-      record.errorMessage = `HTTP ${response.status}`;
-      throw new ProbeError(`HTTP ${response.status}`, errorType, response.status, response.data);
+      record.errorMessage = message;
+      throw new ProbeError(message, errorType, response.status, response.data);
     }
     return response;
   } catch (error) {
@@ -200,6 +256,7 @@ export async function discover(
       throw new ProbeError('baseURL 无效，请包含 http:// 或 https://', 'invalid_url');
     }
     profile = { ...profile, baseURL: normalized };
+    const provider = detectProvider(profile.baseURL);
     const endpointToken = await authorizeEndpoint(profile, signal);
     updateStep(run, 'connectivity', {
       status: profile.baseURL.startsWith('https:') ? 'success' : 'warning',
@@ -207,10 +264,45 @@ export async function discover(
       completedAt: new Date().toISOString(),
     });
 
+    let authenticationFailed = false;
+    updateStep(run, 'authentication', { status: 'running', startedAt: new Date().toISOString() });
+    const normalizedKey = normalizeApiKey(profile.apiKey, profile.authMode);
+    if (provider?.authenticationRequest && normalizedKey && profile.authMode !== 'none') {
+      try {
+        const response = await makeRequest(run, 'authentication', endpointToken, profile, provider.authenticationRequest, signal, onUpdate);
+        updateStep(run, 'authentication', {
+          status: 'success', summary: `${provider.label} API Key 验证成功（HTTP ${response.status}）`, completedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        if (error instanceof ProbeError && error.type === 'cancelled') throw error;
+        authenticationFailed = true;
+        updateStep(run, 'authentication', {
+          status: 'error', summary: error instanceof Error ? error.message : `${provider.label} 认证失败`, completedAt: new Date().toISOString(),
+        });
+      }
+    } else if (!normalizedKey || profile.authMode === 'none') {
+      updateStep(run, 'authentication', {
+        status: 'warning',
+        summary: provider?.id === 'openrouter'
+          ? '未提供 OpenRouter API Key；模型目录仍可发现，但主动能力验证需要有效密钥'
+          : '未配置 API Key；仅可探测允许匿名访问的端点',
+        completedAt: new Date().toISOString(),
+      });
+    } else {
+      updateStep(run, 'authentication', {
+        status: 'success', summary: '认证 Header 已安全构造，将由只读模型端点验证', completedAt: new Date().toISOString(),
+      });
+    }
+
     updateStep(run, 'protocol', { status: 'running', startedAt: new Date().toISOString() });
-    const candidates = adapterCandidates(profile.protocol);
+    const fallbackCandidates = adapterCandidates(profile.protocol);
+    const preferredAdapter = profile.protocol === 'auto' && provider ? adapterFor(provider.protocol) : undefined;
+    const candidates = preferredAdapter
+      ? [preferredAdapter, ...fallbackCandidates.filter((item) => item.id !== preferredAdapter.id)]
+      : fallbackCandidates;
     let selected: ProtocolAdapter | undefined;
     let payload: unknown;
+    let lastDiscoveryError: ProbeError | undefined;
     const attempted = new Set<string>();
     for (const adapter of candidates) {
       for (const request of adapter.discoveryRequests(profile.baseURL)) {
@@ -229,19 +321,25 @@ export async function discover(
           }
         } catch (error) {
           if (error instanceof ProbeError && error.type === 'cancelled') throw error;
+          if (error instanceof ProbeError) lastDiscoveryError = error;
         }
       }
       if (selected) break;
     }
-    if (!selected) throw new ProbeError('未识别到兼容的模型列表响应', 'format');
+    if (!selected) throw lastDiscoveryError ?? new ProbeError('未识别到兼容的模型列表响应', 'format');
     run.protocol = selected.id;
     updateStep(run, 'protocol', {
-      status: 'success', summary: `识别为 ${selected.label}`, completedAt: new Date().toISOString(),
+      status: 'success', summary: `识别为 ${selected.label}${provider ? `（${provider.label}）` : ''}`, completedAt: new Date().toISOString(),
     });
 
     updateStep(run, 'models', { status: 'running', startedAt: new Date().toISOString() });
     const models = selected.parseModels(payload).map((model) => ({
       ...model,
+      ...(provider ? {
+        discoverySource: `${provider.label} ${model.discoverySource}`,
+        supportedEndpoints: provider.supportedEndpoints ?? model.supportedEndpoints,
+      } : {}),
+      ...(profile.protocol === 'auto' && provider ? { protocol: provider.protocol } : {}),
       rawMetadata: sanitizeData(model.rawMetadata, [profile.apiKey]),
     }));
     if (!models.length) throw new ProbeError('响应有效，但未发现模型', 'format');
@@ -253,7 +351,7 @@ export async function discover(
       status: 'success', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
       summary: '已归一化声明与推测证据；主动验证仍为独立操作',
     });
-    run.status = 'success';
+    run.status = authenticationFailed ? 'partial' : 'success';
     run.completedAt = new Date().toISOString();
   } catch (error) {
     const probeError = error instanceof ProbeError ? error : new ProbeError('探测失败', 'network');

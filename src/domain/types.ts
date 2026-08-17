@@ -3,6 +3,8 @@ export type ProtocolType =
   | 'openai-chat'
   | 'openai-responses'
   | 'anthropic'
+  | 'gemini'
+  | 'cohere'
   | 'ollama'
   | 'llamacpp'
   | 'openai-compatible'

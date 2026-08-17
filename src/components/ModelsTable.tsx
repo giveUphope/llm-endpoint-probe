@@ -43,7 +43,7 @@ export function ModelsTable(props: Props) {
           <option value="">全部置信度</option><option value="high">高置信度</option><option value="medium">中置信度</option><option value="low">低置信度</option><option value="unknown">未知</option>
         </select>
         <select aria-label="协议筛选" value={props.protocolFilter} onChange={(event) => props.onProtocolFilter(event.target.value)}>
-          <option value="">全部协议</option><option value="openai-compatible">OpenAI-compatible</option><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic">Anthropic</option><option value="ollama">Ollama</option><option value="manual">手工 / 未知</option>
+          <option value="">全部协议</option><option value="openai-compatible">OpenAI-compatible</option><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option><option value="cohere">Cohere</option><option value="ollama">Ollama</option><option value="manual">手工 / 未知</option>
         </select>
         <select aria-label="探测结果筛选" value={props.statusFilter} onChange={(event) => props.onStatusFilter(event.target.value)}>
           <option value="">全部结果</option><option value="discovered">已发现</option><option value="validated">已验证</option><option value="partial">部分完成</option><option value="error">错误</option>
