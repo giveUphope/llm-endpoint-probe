@@ -5,7 +5,10 @@
 ## 功能
 
 - 管理端点名称、`baseURL`、认证方式、附加 Headers、查询参数和请求超时。
-- 自动识别 OpenAI-compatible 与 Ollama 模型列表，并支持 OpenAI Chat、Responses、Anthropic、llama.cpp 和通用数组协议配置。
+- 原生识别 OpenAI、Anthropic、Google Gemini、Cohere 与 Ollama 模型目录，并支持对应的最小能力验证请求。
+- 为 OpenRouter、Mistral、Groq、Together AI、DeepSeek 和 xAI 提供经过官方文档核对的 OpenAI-compatible 基址与认证预设。
+- 识别 Azure OpenAI、Amazon Bedrock 和 Google Vertex AI，明确提示部署路径、OAuth、API 版本或 SigV4 等受限支持边界。
+- 提供推荐认证配置、Bearer 输入规范化和带提供商上下文的 401/403 诊断。
 - 分层展示连通性、协议识别、模型发现和能力归一化过程。
 - 对 Tools、JSON、结构化输出、Streaming 等能力执行可选的最小验证请求。
 - 区分端点声明、主动验证、规则推测和未知状态，并显示证据与置信度。

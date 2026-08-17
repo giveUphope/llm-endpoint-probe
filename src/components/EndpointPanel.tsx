@@ -1,11 +1,14 @@
-import { Copy, Eye, EyeOff, FileDown, FileUp, Plus, Save, Trash2, X } from 'lucide-react';
+import { Copy, Eye, EyeOff, FileDown, FileUp, Plus, Save, ShieldCheck, Sparkles, Trash2, X } from 'lucide-react';
 import { useRef, useState } from 'react';
 import type { EndpointProfile, KeyValue } from '../domain/types';
 import { emptyPair } from '../lib/profile';
+import { applyProviderPreset, detectProvider } from '../lib/providers';
+import { normalizeApiKey } from '../lib/security';
 
 const protocolOptions = [
   ['auto', '自动识别'], ['openai-chat', 'OpenAI Chat Completions'], ['openai-responses', 'OpenAI Responses'],
-  ['anthropic', 'Anthropic Messages'], ['ollama', 'Ollama'], ['llamacpp', 'llama.cpp server'],
+  ['anthropic', 'Anthropic Messages'], ['gemini', 'Google Gemini'], ['cohere', 'Cohere v2 Chat'],
+  ['ollama', 'Ollama'], ['llamacpp', 'llama.cpp server'],
   ['openai-compatible', 'OpenAI-compatible gateway'], ['manual', '手工 / 未知'],
 ] as const;
 
@@ -46,6 +49,11 @@ export function EndpointPanel(props: Props) {
   const [showKey, setShowKey] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const patch = (change: Partial<EndpointProfile>) => props.onChange({ ...props.profile, ...change, updatedAt: new Date().toISOString() });
+  const provider = detectProvider(props.profile.baseURL);
+  const normalizedKey = normalizeApiKey(props.profile.apiKey, props.profile.authMode);
+  const keyWasNormalized = Boolean(props.profile.apiKey && props.profile.apiKey.trim() !== normalizedKey);
+  const authHeaderName = props.profile.authMode === 'bearer' ? 'authorization' : props.profile.authMode === 'api-key' ? 'api-key' : props.profile.customHeaderName.toLowerCase();
+  const hasAuthConflict = props.profile.authMode !== 'none' && props.profile.headers.some((item) => item.key.trim().toLowerCase() === authHeaderName);
   return (
     <aside className="endpoint-panel">
       <div className="panel-heading">
@@ -63,12 +71,15 @@ export function EndpointPanel(props: Props) {
 
       <label className="field"><span>端点名称</span><input value={props.profile.name} onChange={(event) => patch({ name: event.target.value })} /></label>
       <label className="field"><span>baseURL</span><input placeholder="https://api.example.com/v1" value={props.profile.baseURL} onChange={(event) => patch({ baseURL: event.target.value })} /></label>
+      {provider && <div className={`provider-detection provider-${provider.support}`}><ShieldCheck size={16} /><div><strong>已识别 {provider.label}<span className="provider-support">{{ native: '原生', compatible: 'OpenAI 兼容', limited: '受限' }[provider.support]}</span></strong><small>{provider.apiKeyHint}</small><small>{provider.note}</small>{provider.optionalHeaders?.length ? <small>可选 Header：{provider.optionalHeaders.join('、')}</small> : null}</div><button className="secondary-button compact-button" onClick={() => props.onChange(applyProviderPreset(props.profile, provider))}><Sparkles size={14} />应用推荐</button></div>}
       <label className="field"><span>API 协议</span><select value={props.profile.protocol} onChange={(event) => patch({ protocol: event.target.value as EndpointProfile['protocol'] })}>{protocolOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <label className="field"><span>认证方式</span><select value={props.profile.authMode} onChange={(event) => patch({ authMode: event.target.value as EndpointProfile['authMode'] })}>
         <option value="bearer">Authorization: Bearer</option><option value="api-key">api-key Header</option><option value="custom">自定义 Header</option><option value="none">无认证</option>
       </select></label>
       {props.profile.authMode === 'custom' && <div className="split-fields"><label className="field"><span>Header 名</span><input value={props.profile.customHeaderName} onChange={(event) => patch({ customHeaderName: event.target.value })} /></label><label className="field"><span>值模板</span><input value={props.profile.customHeaderTemplate} onChange={(event) => patch({ customHeaderTemplate: event.target.value })} /></label></div>}
       {props.profile.authMode !== 'none' && <label className="field"><span>API Key</span><div className="input-with-action"><input type={showKey ? 'text' : 'password'} autoComplete="off" value={props.profile.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} /><button className="icon-button subtle" title={showKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowKey(!showKey)}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>}
+      {keyWasNormalized && <div className="inline-notice">发送前会自动移除多余引号、空白和 Bearer/Authorization 前缀。</div>}
+      {hasAuthConflict && <div className="inline-notice warning-notice">附加 Headers 中存在同名认证字段；该字段将被忽略，以“认证方式”生成的 Header 为准，避免重复值导致 401。</div>}
 
       <PairEditor label="附加 Headers" items={props.profile.headers} onChange={(headers) => patch({ headers })} />
       <PairEditor label="查询参数" items={props.profile.queryParams} onChange={(queryParams) => patch({ queryParams })} />

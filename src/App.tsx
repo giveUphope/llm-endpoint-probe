@@ -57,7 +57,7 @@ export default function App() {
     setActiveView('logs');
     const result = await discover(profile, controller.signal, setRun);
     if (result.models.length) { setSelectedId(result.models[0].id); setActiveView('models'); }
-    notify(result.status === 'success' ? `探测完成：发现 ${result.models.length} 个模型` : result.status === 'cancelled' ? '探测已取消' : '探测未完成，请查看错误详情');
+    notify(result.status === 'success' ? `探测完成：发现 ${result.models.length} 个模型` : result.status === 'partial' ? `发现 ${result.models.length} 个模型，但认证诊断存在问题` : result.status === 'cancelled' ? '探测已取消' : '探测未完成，请查看错误详情');
   };
 
   const importProfile = async (file: File) => {

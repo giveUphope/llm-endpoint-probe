@@ -36,22 +36,68 @@ export function normalizeModel(raw: Record<string, unknown>, protocol: ProtocolT
     }
   }
 
-  const modalitiesRaw = raw.input_modalities ?? raw.modalities ?? declared.modalities;
+  const supportedParameters = new Set(
+    Array.isArray(raw.supported_parameters) ? raw.supported_parameters.map((item) => String(item).toLowerCase()) : [],
+  );
+  const parameterCapabilities: Partial<Record<keyof typeof capabilities, string[]>> = {
+    supportsTools: ['tools', 'tool_choice'],
+    supportsJsonMode: ['response_format'],
+    supportsStructuredOutput: ['structured_outputs'],
+    supportsReasoning: ['reasoning', 'reasoning_effort', 'include_reasoning'],
+    supportsTemperature: ['temperature'],
+    supportsTopP: ['top_p'],
+    supportsStop: ['stop'],
+    supportsSeed: ['seed'],
+    supportsStreaming: ['stream'],
+    supportsPromptCache: ['cache_control'],
+  };
+  for (const [key, parameters] of Object.entries(parameterCapabilities)) {
+    const matched = parameters?.filter((parameter) => supportedParameters.has(parameter)) ?? [];
+    if (matched.length) {
+      capabilities[key as keyof typeof capabilities] = {
+        value: 'supported',
+        evidence: [evidence('endpoint', 'medium', `${source} supported_parameters 包含 ${matched.join(', ')}`)],
+      };
+    }
+  }
+
+  const architecture = raw.architecture && typeof raw.architecture === 'object'
+    ? raw.architecture as Record<string, unknown>
+    : {};
+  const modalitiesRaw = raw.input_modalities ?? raw.modalities ?? architecture.input_modalities ?? declared.modalities;
   const modalities = Array.isArray(modalitiesRaw)
-    ? modalitiesRaw.filter((item): item is DiscoveredModel['inputModalities'][number] =>
-        ['text', 'image', 'audio', 'video', 'pdf'].includes(String(item)),
-      )
+    ? [...new Set(modalitiesRaw.map((item) => String(item) === 'file' ? 'pdf' : String(item)).filter((item): item is DiscoveredModel['inputModalities'][number] =>
+        ['text', 'image', 'audio', 'video', 'pdf'].includes(item),
+      ))]
     : ['text' as const];
+
+  const topProvider = raw.top_provider && typeof raw.top_provider === 'object'
+    ? raw.top_provider as Record<string, unknown>
+    : {};
+  const reasoning = raw.reasoning && typeof raw.reasoning === 'object'
+    ? raw.reasoning as Record<string, unknown>
+    : {};
+  const pricing = raw.pricing && typeof raw.pricing === 'object'
+    ? raw.pricing as Record<string, unknown>
+    : {};
+  if (capabilities.supportsPromptCache.value === 'unknown' && pricing.input_cache_read != null) {
+    capabilities.supportsPromptCache = {
+      value: 'inferred',
+      evidence: [evidence('inferred', 'low', `${source} pricing 包含 input_cache_read；实际缓存能力取决于路由 Provider`) ],
+    };
+  }
 
   const model = inferCapabilities({
     id,
     displayName: String(raw.display_name ?? raw.name ?? id),
     protocol,
     contextWindow: numberFrom(raw, ['context_window', 'context_length', 'num_ctx']),
-    maxOutputTokens: numberFrom(raw, ['max_output_tokens', 'max_tokens', 'num_predict']),
+    maxOutputTokens: numberFrom(raw, ['max_output_tokens', 'max_tokens', 'num_predict']) ?? numberFrom(topProvider, ['max_completion_tokens']),
     inputModalities: modalities,
     capabilities,
-    reasoningLevels: Array.isArray(raw.reasoning_levels) ? raw.reasoning_levels.map(String) : [],
+    reasoningLevels: Array.isArray(raw.reasoning_levels)
+      ? raw.reasoning_levels.map(String)
+      : Array.isArray(reasoning.supported_efforts) ? reasoning.supported_efforts.map(String) : [],
     supportedEndpoints: Array.isArray(raw.supported_endpoints) ? raw.supported_endpoints.map(String) : [],
     discoverySource: source,
     confidence: 'unknown',
