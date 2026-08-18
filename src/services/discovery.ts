@@ -12,9 +12,9 @@ import type {
   ProxyResponse,
   RequestRecord,
 } from '../domain/types';
-import { buildAuthHeaders, mergeHeaders, normalizeApiKey, redactHeaders, redactText, sanitizeData } from '../lib/security';
+import { mergeHeaders, normalizeApiKey, redactHeaders, redactText, sanitizeData } from '../lib/security';
 import { detectProvider } from '../lib/providers';
-import { normalizeBaseURL, pairsToRecord, uid } from '../lib/profile';
+import { uid } from '../lib/profile';
 import { authorizeEndpoint, ProbeError, proxyRequest } from './proxy';
 
 const stepDefinitions = [
@@ -114,8 +114,8 @@ export function describeHttpFailure(status: number, data: unknown, profile: Endp
   let guidance = `HTTP ${status}`;
   if (status === 401) {
     guidance = !key || profile.authMode === 'none'
-      ? `HTTP 401：${provider?.label ?? '端点'}需要认证，请选择正确的认证方式并填写 API Key`
-      : `HTTP 401：${provider?.label ?? '端点'}拒绝了认证，请确认 API Key 有效、未过期且 Header 模式正确`;
+      ? `HTTP 401：${provider?.label ?? '端点'}需要认证，请填写 API Key`
+      : `HTTP 401：${provider?.label ?? '端点'}拒绝了自动认证，请确认 API Key 有效、未过期且具有接口权限`;
   } else if (status === 403) {
     guidance = `HTTP 403：认证已到达端点，但当前密钥或账号没有访问权限`;
   } else if (status === 429) {
@@ -153,20 +153,6 @@ function updateStep(run: DiscoveryRun, id: string, patch: Partial<DiscoveryStep>
   if (step) Object.assign(step, patch);
 }
 
-export function headersFor(profile: EndpointProfile): Record<string, string> {
-  const additional = pairsToRecord(profile.headers);
-  const managedHeader = profile.authMode === 'bearer'
-    ? 'authorization'
-    : profile.authMode === 'api-key' ? 'api-key' : profile.authMode === 'custom' ? profile.customHeaderName.trim().toLowerCase() : '';
-  const filteredAdditional = managedHeader
-    ? Object.fromEntries(Object.entries(additional).filter(([name]) => name.trim().toLowerCase() !== managedHeader))
-    : additional;
-  return mergeHeaders(
-    filteredAdditional,
-    buildAuthHeaders(profile.authMode, profile.apiKey, profile.customHeaderName, profile.customHeaderTemplate),
-  );
-}
-
 function publicURL(profile: EndpointProfile, path: string): string {
   return `${profile.baseURL.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
 }
@@ -181,7 +167,7 @@ async function makeRequest(
   onUpdate: RunUpdate,
 ) {
   const id = uid();
-  const headers = mergeHeaders(headersFor(profile), request.headers);
+  const headers = mergeHeaders(request.headers);
   const secrets = [profile.apiKey, normalizeApiKey(profile.apiKey, profile.authMode)].filter(Boolean);
   const record: RequestRecord = {
     id,
@@ -205,7 +191,6 @@ async function makeRequest(
           path: request.path,
           method: request.method,
           headers,
-          queryParams: pairsToRecord(profile.queryParams),
           body: request.body,
           timeoutMs: profile.timeoutMs,
         }, signal);
@@ -251,13 +236,19 @@ export async function discover(
   onUpdate(structuredClone(run));
   try {
     updateStep(run, 'connectivity', { status: 'running', startedAt: new Date().toISOString() });
-    let normalized: string;
-    try { normalized = normalizeBaseURL(profile.baseURL); } catch {
+    const submittedURL = profile.baseURL.trim();
+    try { new URL(submittedURL); } catch {
       throw new ProbeError('baseURL 无效，请包含 http:// 或 https://', 'invalid_url');
     }
-    profile = { ...profile, baseURL: normalized };
+    profile = { ...profile, baseURL: submittedURL };
+    const automaticProtocol = profile.protocol === 'auto';
+    const authorization = await authorizeEndpoint(profile, signal);
+    profile = authorization.profile;
+    run.endpointName = profile.name;
+    run.endpointBaseURL = profile.baseURL;
+    run.endpointQueryParams = profile.queryParams;
+    const endpointToken = authorization.endpointToken;
     const provider = detectProvider(profile.baseURL);
-    const endpointToken = await authorizeEndpoint(profile, signal);
     updateStep(run, 'connectivity', {
       status: profile.baseURL.startsWith('https:') ? 'success' : 'warning',
       summary: profile.baseURL.startsWith('https:') ? `已授权 ${profile.baseURL}` : `HTTP 未加密：${profile.baseURL}`,
@@ -295,8 +286,8 @@ export async function discover(
     }
 
     updateStep(run, 'protocol', { status: 'running', startedAt: new Date().toISOString() });
-    const fallbackCandidates = adapterCandidates(profile.protocol);
-    const preferredAdapter = profile.protocol === 'auto' && provider ? adapterFor(provider.protocol) : undefined;
+    const fallbackCandidates = adapterCandidates(automaticProtocol ? 'auto' : profile.protocol);
+    const preferredAdapter = automaticProtocol && provider ? adapterFor(profile.protocol) : undefined;
     const candidates = preferredAdapter
       ? [preferredAdapter, ...fallbackCandidates.filter((item) => item.id !== preferredAdapter.id)]
       : fallbackCandidates;
@@ -311,7 +302,7 @@ export async function discover(
         attempted.add(key);
         try {
           const response = await makeRequest(run, 'protocol', endpointToken, profile, request, signal, onUpdate);
-          const recognizer = profile.protocol === 'auto'
+          const recognizer = automaticProtocol
             ? candidates.find((item) => item.recognizes(response.data))
             : adapter;
           if (recognizer) {
@@ -339,7 +330,7 @@ export async function discover(
         discoverySource: `${provider.label} ${model.discoverySource}`,
         supportedEndpoints: provider.supportedEndpoints ?? model.supportedEndpoints,
       } : {}),
-      ...(profile.protocol === 'auto' && provider ? { protocol: provider.protocol } : {}),
+      ...(automaticProtocol && provider ? { protocol: profile.protocol } : {}),
       rawMetadata: sanitizeData(model.rawMetadata, [profile.apiKey]),
     }));
     if (!models.length) throw new ProbeError('响应有效，但未发现模型', 'format');
@@ -393,7 +384,9 @@ export async function validateModel(
   if (!profile.allowValidation) throw new ProbeError('请先启用主动验证', 'blocked');
   const next = structuredClone(model);
   next.status = 'validating';
-  const endpointToken = await authorizeEndpoint(profile, signal);
+  const authorization = await authorizeEndpoint(profile, signal);
+  profile = authorization.profile;
+  const endpointToken = authorization.endpointToken;
   const adapter = adapterFor(model.protocol);
   const run = createRun(profile.id);
   try {

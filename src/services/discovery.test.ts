@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ProxyResponse } from '../domain/types';
-import { describeHttpFailure, evaluateValidation, headersFor, mergeValidationEvidence, summarizeResponse } from './discovery';
+import { describeHttpFailure, evaluateValidation, mergeValidationEvidence, summarizeResponse } from './discovery';
 import { createProfile } from '../lib/profile';
 
 function response(data: unknown, contentType = 'application/json'): ProxyResponse {
@@ -35,7 +35,7 @@ describe('active validation evidence', () => {
   it('turns authentication failures into actionable provider guidance', () => {
     const profile = { ...createProfile(), baseURL: 'https://openrouter.ai/api/v1', apiKey: 'sk-or-v1-invalid' };
     expect(describeHttpFailure(401, { error: { message: 'Invalid API key' } }, profile)).toBe(
-      'HTTP 401：OpenRouter拒绝了认证，请确认 API Key 有效、未过期且 Header 模式正确；服务端：Invalid API key',
+      'HTTP 401：OpenRouter拒绝了自动认证，请确认 API Key 有效、未过期且具有接口权限；服务端：Invalid API key',
     );
   });
 
@@ -45,9 +45,4 @@ describe('active validation evidence', () => {
     expect((result as { data: unknown[] }).data).toHaveLength(3);
   });
 
-  it('does not send stale additional auth headers over the managed auth mode', () => {
-    const profile = { ...createProfile(), apiKey: '', headers: [{ id: '1', key: 'authorization', value: 'Bearer stale' }] };
-    expect(headersFor(profile)).toEqual({});
-    expect(headersFor({ ...profile, apiKey: 'current' })).toEqual({ Authorization: 'Bearer current' });
-  });
 });

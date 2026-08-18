@@ -38,21 +38,21 @@ export function sanitizeData(value: unknown, secrets: string[] = [], depth = 0):
 }
 
 export function buildAuthHeaders(
-  mode: 'bearer' | 'api-key' | 'custom' | 'none',
+  mode: 'auto' | 'bearer' | 'api-key' | 'custom' | 'none',
   apiKey: string,
   customName: string,
   customTemplate: string,
 ): Record<string, string> {
   const normalized = normalizeApiKey(apiKey, mode);
   if (!normalized || mode === 'none') return {};
-  if (mode === 'bearer') return { Authorization: `Bearer ${normalized}` };
+  if (mode === 'auto' || mode === 'bearer') return { Authorization: `Bearer ${normalized}` };
   if (mode === 'api-key') return { 'api-key': normalized };
   return customName.trim() ? { [customName.trim()]: customTemplate.replaceAll('{{key}}', normalized) } : {};
 }
 
-export function normalizeApiKey(value: string, mode: 'bearer' | 'api-key' | 'custom' | 'none'): string {
+export function normalizeApiKey(value: string, mode: 'auto' | 'bearer' | 'api-key' | 'custom' | 'none'): string {
   let normalized = value.trim().replace(/^["']|["']$/g, '').trim();
-  if (mode === 'bearer') {
+  if (mode === 'auto' || mode === 'bearer') {
     normalized = normalized.replace(/^Authorization\s*:\s*/i, '');
     while (/^Bearer\s+/i.test(normalized)) normalized = normalized.replace(/^Bearer\s+/i, '').trim();
   }

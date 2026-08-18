@@ -113,14 +113,59 @@ export function detectProvider(baseURL: string): ProviderPreset | undefined {
   }
 }
 
-export function applyProviderPreset(profile: EndpointProfile, preset: ProviderPreset): EndpointProfile {
+export function inferEndpointFromURL(value: string): { baseURL: string; protocol: ProtocolType } {
+  const url = new URL(value.trim());
+  url.hash = '';
+  url.search = '';
+  const pathname = url.pathname.replace(/\/$/, '') || '/';
+  const patterns: Array<[RegExp, ProtocolType]> = [
+    [/^(.*)\/models\/[^/]+:(?:generateContent|streamGenerateContent|countTokens)$/i, 'gemini'],
+    [/^(.*)\/chat\/completions$/i, 'openai-chat'],
+    [/^(.*)\/responses$/i, 'openai-responses'],
+    [/^(.*)\/messages$/i, 'anthropic'],
+    [/^(.*)\/v2\/chat$/i, 'cohere'],
+    [/^(.*)\/api\/(?:chat|generate|tags|show|ps)$/i, 'ollama'],
+    [/^(.*)\/(?:completion|tokenize|detokenize)$/i, 'llamacpp'],
+    [/^(.*)\/models$/i, 'auto'],
+  ];
+  let protocol: ProtocolType = 'auto';
+  let basePath = pathname;
+  for (const [pattern, candidate] of patterns) {
+    const match = pathname.match(pattern);
+    if (!match) continue;
+    protocol = candidate;
+    basePath = match[1] || '/';
+    break;
+  }
+  url.pathname = basePath || '/';
+  return { baseURL: url.toString().replace(/\/$/, ''), protocol };
+}
+
+function generatedEndpointName(baseURL: string, provider?: ProviderPreset): string {
+  const url = new URL(baseURL);
+  if (provider?.id === 'azure-openai') return `${provider.label} · ${url.hostname.split('.')[0]}`;
+  if (provider) return provider.label;
+  const path = url.pathname.replace(/\/$/, '');
+  const meaningfulPath = path && !/^\/(?:api\/)?v\d+(?:beta\d*)?$/i.test(path) ? path : '';
+  return `${url.host}${meaningfulPath}`.slice(0, 120);
+}
+
+export function resolveProviderProfile(profile: EndpointProfile): { profile: EndpointProfile; provider?: ProviderPreset } {
+  const inferred = inferEndpointFromURL(profile.baseURL);
+  const provider = detectProvider(inferred.baseURL);
+  const protocol = inferred.protocol !== 'auto' ? inferred.protocol : provider?.protocol ?? 'auto';
+  const authMode: AuthMode = provider?.authMode ?? (protocol === 'ollama' || protocol === 'llamacpp' ? 'none' : 'bearer');
   return {
-    ...profile,
-    baseURL: preset.recommendedBaseURL ?? profile.baseURL,
-    protocol: preset.protocol,
-    authMode: preset.authMode,
-    customHeaderName: preset.customHeaderName ?? profile.customHeaderName,
-    customHeaderTemplate: preset.customHeaderTemplate ?? profile.customHeaderTemplate,
-    updatedAt: new Date().toISOString(),
+    provider,
+    profile: {
+      ...profile,
+      name: generatedEndpointName(inferred.baseURL, provider),
+      baseURL: inferred.baseURL,
+      protocol,
+      authMode,
+      customHeaderName: provider?.customHeaderName ?? 'X-API-Key',
+      customHeaderTemplate: provider?.customHeaderTemplate ?? '{{key}}',
+      updatedAt: new Date().toISOString(),
+    },
   };
 }

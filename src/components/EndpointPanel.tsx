@@ -1,100 +1,60 @@
-import { Copy, Eye, EyeOff, FileDown, FileUp, Plus, Save, ShieldCheck, Sparkles, Trash2, X } from 'lucide-react';
-import { useRef, useState } from 'react';
-import type { EndpointProfile, KeyValue } from '../domain/types';
-import { emptyPair } from '../lib/profile';
-import { applyProviderPreset, detectProvider } from '../lib/providers';
-import { normalizeApiKey } from '../lib/security';
-
-const protocolOptions = [
-  ['auto', '自动识别'], ['openai-chat', 'OpenAI Chat Completions'], ['openai-responses', 'OpenAI Responses'],
-  ['anthropic', 'Anthropic Messages'], ['gemini', 'Google Gemini'], ['cohere', 'Cohere v2 Chat'],
-  ['ollama', 'Ollama'], ['llamacpp', 'llama.cpp server'],
-  ['openai-compatible', 'OpenAI-compatible gateway'], ['manual', '手工 / 未知'],
-] as const;
+import { Eye, EyeOff, History, PanelLeftClose, RefreshCw, RotateCcw, ShieldAlert, Trash2, X } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import type { EndpointProfile } from '../domain/types';
+import type { EndpointHistoryItem } from '../services/proxy';
 
 interface Props {
   profile: EndpointProfile;
-  profiles: EndpointProfile[];
+  history: EndpointHistoryItem[];
+  historyLoading: boolean;
   running: boolean;
+  proxyStatus: 'checking' | 'online' | 'offline';
+  proxyMessage: string;
   onChange: (profile: EndpointProfile) => void;
-  onSelect: (id: string) => void;
-  onNew: () => void;
-  onSave: () => void;
-  onDuplicate: () => void;
-  onDelete: () => void;
-  onImport: (file: File) => void;
-  onExport: () => void;
+  onClose: () => void;
+  onRestoreHistory: (id: string) => void;
+  onClearHistory: () => void;
   onProbe: () => void;
   onCancel: () => void;
 }
 
-function PairEditor({ label, items, onChange }: { label: string; items: KeyValue[]; onChange: (items: KeyValue[]) => void }) {
-  const update = (id: string, patch: Partial<KeyValue>) => onChange(items.map((item) => item.id === id ? { ...item, ...patch } : item));
-  return (
-    <div className="field pair-field">
-      <div className="field-label-row"><span>{label}</span><button className="icon-button subtle" title={`添加${label}`} onClick={() => onChange([...items, emptyPair()])}><Plus size={15} /></button></div>
-      {items.length === 0 && <div className="pair-empty">未设置</div>}
-      {items.map((item) => (
-        <div className="pair-row" key={item.id}>
-          <input aria-label={`${label}名称`} placeholder="Header" value={item.key} onChange={(event) => update(item.id, { key: event.target.value })} />
-          <input aria-label={`${label}值`} placeholder="值" value={item.value} onChange={(event) => update(item.id, { value: event.target.value })} />
-          <button className="icon-button subtle" title="删除此项" onClick={() => onChange(items.filter((value) => value.id !== item.id))}><X size={14} /></button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export function EndpointPanel(props: Props) {
   const [showKey, setShowKey] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [historyId, setHistoryId] = useState('');
   const patch = (change: Partial<EndpointProfile>) => props.onChange({ ...props.profile, ...change, updatedAt: new Date().toISOString() });
-  const provider = detectProvider(props.profile.baseURL);
-  const normalizedKey = normalizeApiKey(props.profile.apiKey, props.profile.authMode);
-  const keyWasNormalized = Boolean(props.profile.apiKey && props.profile.apiKey.trim() !== normalizedKey);
-  const authHeaderName = props.profile.authMode === 'bearer' ? 'authorization' : props.profile.authMode === 'api-key' ? 'api-key' : props.profile.customHeaderName.toLowerCase();
-  const hasAuthConflict = props.profile.authMode !== 'none' && props.profile.headers.some((item) => item.key.trim().toLowerCase() === authHeaderName);
+  useEffect(() => {
+    if (!props.history.some((item) => item.id === historyId)) setHistoryId(props.history[0]?.id ?? '');
+  }, [historyId, props.history]);
   return (
     <aside className="endpoint-panel">
       <div className="panel-heading">
-        <div><span className="eyebrow">当前端点</span><strong>连接配置</strong></div>
-        <button className="icon-button" title="新建端点" onClick={props.onNew}><Plus size={17} /></button>
+        <div><span className="eyebrow">端点探测</span><strong>连接参数</strong></div>
+        <button className="icon-button compact-only" title="关闭连接配置" onClick={props.onClose}><PanelLeftClose size={17} /></button>
       </div>
 
-      <div className="profile-select-row">
-        <select aria-label="已保存端点" value={props.profile.id} onChange={(event) => props.onSelect(event.target.value)}>
-          {props.profiles.map((profile) => <option value={profile.id} key={profile.id}>{profile.name}</option>)}
-        </select>
-        <button className="icon-button" title="复制端点" onClick={props.onDuplicate}><Copy size={16} /></button>
-        <button className="icon-button danger" title="删除端点" onClick={props.onDelete}><Trash2 size={16} /></button>
+      <div className="history-field">
+        <div className="field-label-row"><span><History size={14} />会话探测历史</span><small>后端内存</small></div>
+        <div className="history-select-row">
+          <select aria-label="会话探测历史" disabled={props.historyLoading || !props.history.length} value={historyId} onChange={(event) => setHistoryId(event.target.value)}>
+            {!props.history.length && <option value="">暂无探测记录</option>}
+            {props.history.map((item) => <option value={item.id} key={item.id}>{item.name} · {new Date(item.lastUsedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}{item.hasApiKey ? ' · 含密钥' : ''}</option>)}
+          </select>
+          <button className="icon-button" disabled={!historyId || props.historyLoading} title="还原端点和 API Key" onClick={() => props.onRestoreHistory(historyId)}><RotateCcw size={16} /></button>
+          <button className="icon-button danger" disabled={!props.history.length || props.historyLoading || props.running} title="清空后端探测历史" onClick={props.onClearHistory}><Trash2 size={16} /></button>
+        </div>
+        <small className="history-note">只保留在当前后端进程中；关闭后端或主动清空后无法恢复。</small>
       </div>
 
-      <label className="field"><span>端点名称</span><input value={props.profile.name} onChange={(event) => patch({ name: event.target.value })} /></label>
-      <label className="field"><span>baseURL</span><input placeholder="https://api.example.com/v1" value={props.profile.baseURL} onChange={(event) => patch({ baseURL: event.target.value })} /></label>
-      {provider && <div className={`provider-detection provider-${provider.support}`}><ShieldCheck size={16} /><div><strong>已识别 {provider.label}<span className="provider-support">{{ native: '原生', compatible: 'OpenAI 兼容', limited: '受限' }[provider.support]}</span></strong><small>{provider.apiKeyHint}</small><small>{provider.note}</small>{provider.optionalHeaders?.length ? <small>可选 Header：{provider.optionalHeaders.join('、')}</small> : null}</div><button className="secondary-button compact-button" onClick={() => props.onChange(applyProviderPreset(props.profile, provider))}><Sparkles size={14} />应用推荐</button></div>}
-      <label className="field"><span>API 协议</span><select value={props.profile.protocol} onChange={(event) => patch({ protocol: event.target.value as EndpointProfile['protocol'] })}>{protocolOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-      <label className="field"><span>认证方式</span><select value={props.profile.authMode} onChange={(event) => patch({ authMode: event.target.value as EndpointProfile['authMode'] })}>
-        <option value="bearer">Authorization: Bearer</option><option value="api-key">api-key Header</option><option value="custom">自定义 Header</option><option value="none">无认证</option>
-      </select></label>
-      {props.profile.authMode === 'custom' && <div className="split-fields"><label className="field"><span>Header 名</span><input value={props.profile.customHeaderName} onChange={(event) => patch({ customHeaderName: event.target.value })} /></label><label className="field"><span>值模板</span><input value={props.profile.customHeaderTemplate} onChange={(event) => patch({ customHeaderTemplate: event.target.value })} /></label></div>}
-      {props.profile.authMode !== 'none' && <label className="field"><span>API Key</span><div className="input-with-action"><input type={showKey ? 'text' : 'password'} autoComplete="off" value={props.profile.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} /><button className="icon-button subtle" title={showKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowKey(!showKey)}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>}
-      {keyWasNormalized && <div className="inline-notice">发送前会自动移除多余引号、空白和 Bearer/Authorization 前缀。</div>}
-      {hasAuthConflict && <div className="inline-notice warning-notice">附加 Headers 中存在同名认证字段；该字段将被忽略，以“认证方式”生成的 Header 为准，避免重复值导致 401。</div>}
+      {props.proxyStatus === 'offline' && <div className="proxy-guard-notice" role="alert"><ShieldAlert size={17} /><div><strong>本地代理未连接</strong><small>{props.proxyMessage}。页面可以继续编辑配置，但不会发送端点请求。</small></div></div>}
 
-      <PairEditor label="附加 Headers" items={props.profile.headers} onChange={(headers) => patch({ headers })} />
-      <PairEditor label="查询参数" items={props.profile.queryParams} onChange={(queryParams) => patch({ queryParams })} />
+      <label className="field"><span>端点 URL</span><input placeholder="https://api.example.com/v1 或完整请求 URL" value={props.profile.baseURL} onChange={(event) => patch({ baseURL: event.target.value, protocol: 'auto', authMode: 'auto' })} /></label>
+      <label className="field"><span>API Key</span><div className="input-with-action"><input type={showKey ? 'text' : 'password'} autoComplete="off" value={props.profile.apiKey} onChange={(event) => patch({ apiKey: event.target.value })} /><button className="icon-button subtle" title={showKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowKey(!showKey)}>{showKey ? <EyeOff size={16} /> : <Eye size={16} />}</button></div></label>
+
       <label className="field"><span>请求超时（毫秒）</span><input type="number" min="1000" max="120000" step="1000" value={props.profile.timeoutMs} onChange={(event) => patch({ timeoutMs: Number(event.target.value) })} /></label>
       <label className="toggle-row"><input type="checkbox" checked={props.profile.allowValidation} onChange={(event) => patch({ allowValidation: event.target.checked })} /><span><strong>允许主动验证</strong><small>会向所选模型发送最小生成请求</small></span></label>
       <label className="toggle-row warning-toggle"><input type="checkbox" checked={props.profile.allowLocalNetwork} onChange={(event) => patch({ allowLocalNetwork: event.target.checked })} /><span><strong>允许本地网络目标</strong><small>仅在信任目标时启用，存在 SSRF 风险</small></span></label>
 
-      <div className="storage-note">保存后配置存入此浏览器的 localStorage；密钥不会加密。共享设备上请勿保存密钥。</div>
-      <div className="panel-actions">
-        <button className="secondary-button" onClick={props.onSave}><Save size={15} />保存</button>
-        <button className="icon-button" title="导入配置" onClick={() => inputRef.current?.click()}><FileUp size={16} /></button>
-        <button className="icon-button" title="导出配置" onClick={props.onExport}><FileDown size={16} /></button>
-        <input ref={inputRef} className="sr-only" type="file" accept="application/json,.json" onChange={(event) => event.target.files?.[0] && props.onImport(event.target.files[0])} />
-      </div>
-      {props.running ? <button className="probe-button cancel" onClick={props.onCancel}><X size={17} />取消探测</button> : <button className="probe-button" onClick={props.onProbe}>开始分层探测</button>}
+      {props.running ? <button className="probe-button cancel" onClick={props.onCancel}><X size={17} />取消探测</button> : <button className={`probe-button ${props.proxyStatus === 'offline' ? 'retry' : ''}`} onClick={props.onProbe}><RefreshCw className={props.proxyStatus === 'checking' ? 'spin' : ''} size={16} />{props.proxyStatus === 'online' ? '开始分层探测' : props.proxyStatus === 'offline' ? '重试代理并开始探测' : '检查代理后开始探测'}</button>}
     </aside>
   );
 }

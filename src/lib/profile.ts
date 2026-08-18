@@ -2,18 +2,14 @@ import type { EndpointProfile, KeyValue } from '../domain/types';
 
 export const uid = () => crypto.randomUUID();
 
-export function emptyPair(): KeyValue {
-  return { id: uid(), key: '', value: '' };
-}
-
 export function createProfile(): EndpointProfile {
   const now = new Date().toISOString();
   return {
     id: uid(),
-    name: '新端点',
+    name: '待识别端点',
     baseURL: '',
     apiKey: '',
-    authMode: 'bearer',
+    authMode: 'auto',
     customHeaderName: 'X-API-Key',
     customHeaderTemplate: '{{key}}',
     protocol: 'auto',

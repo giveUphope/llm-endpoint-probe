@@ -4,18 +4,38 @@ import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
+import type { EndpointProfile, KeyValue } from '../src/domain/types';
+import { resolveProviderProfile } from '../src/lib/providers';
+import { buildAuthHeaders, mergeHeaders } from '../src/lib/security';
 
 const PORT = Number(process.env.PORT || 4174);
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const MAX_HISTORY_ENTRIES = 20;
+const HEALTH_SERVICE = 'llm-endpoint-probe-proxy';
+const GUARD_VERSION = 1;
 
 interface AuthorizedEndpoint {
   baseURL: string;
   allowLocalNetwork: boolean;
+  historyId: string;
+  protocol: EndpointProfile['protocol'];
+  managedHeaders: Record<string, string>;
+  queryParams: Record<string, string>;
   expiresAt: number;
 }
 
+interface EndpointHistoryRecord {
+  id: string;
+  profile: EndpointProfile;
+  providerId?: string;
+  providerLabel?: string;
+  createdAt: string;
+  lastUsedAt: string;
+}
+
 const endpoints = new Map<string, AuthorizedEndpoint>();
+const endpointHistory = new Map<string, EndpointHistoryRecord>();
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
@@ -60,6 +80,94 @@ function normalizedBaseURL(value: unknown): URL {
   return url;
 }
 
+function textValue(value: unknown, fallback = '', maxLength = 16_384): string {
+  return typeof value === 'string' ? value.slice(0, maxLength) : fallback;
+}
+
+function keyValues(value: unknown): KeyValue[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 50).map((item) => {
+    const pair = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+    return {
+      id: textValue(pair.id, crypto.randomUUID(), 128),
+      key: textValue(pair.key, '', 256),
+      value: textValue(pair.value),
+    };
+  });
+}
+
+function endpointProfile(value: unknown): EndpointProfile {
+  const source = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const inputURL = new URL(textValue(source.baseURL));
+  const base = normalizedBaseURL(source.baseURL);
+  const now = new Date().toISOString();
+  const inputQueryParams = [...inputURL.searchParams.entries()]
+    .filter(([key]) => /^api-version$/i.test(key))
+    .map(([key, item]) => ({ id: crypto.randomUUID(), key, value: item }));
+  const configuredQueryParams = keyValues(source.queryParams).filter((item) => /^api-version$/i.test(item.key));
+  const queryParams = [
+    ...configuredQueryParams,
+    ...inputQueryParams.filter((item) => !configuredQueryParams.some((configured) => configured.key.toLowerCase() === item.key.toLowerCase())),
+  ];
+  return {
+    id: textValue(source.id, crypto.randomUUID(), 128),
+    name: textValue(source.name, base.hostname, 120) || base.hostname,
+    baseURL: base.toString().replace(/\/$/, ''),
+    apiKey: textValue(source.apiKey),
+    authMode: 'auto',
+    customHeaderName: 'X-API-Key',
+    customHeaderTemplate: '{{key}}',
+    protocol: 'auto',
+    headers: [],
+    queryParams,
+    timeoutMs: Math.min(Math.max(Number(source.timeoutMs) || 15_000, 1_000), 120_000),
+    allowValidation: source.allowValidation === true,
+    allowLocalNetwork: source.allowLocalNetwork === true,
+    createdAt: textValue(source.createdAt, now, 64),
+    updatedAt: now,
+  };
+}
+
+function upsertHistory(profile: EndpointProfile, provider?: { id: string; label: string }): EndpointHistoryRecord {
+  const now = new Date().toISOString();
+  const existing = [...endpointHistory.values()].find((item) => item.profile.baseURL === profile.baseURL);
+  const record: EndpointHistoryRecord = existing ? {
+    ...existing,
+    profile: structuredClone(profile),
+    providerId: provider?.id,
+    providerLabel: provider?.label,
+    lastUsedAt: now,
+  } : {
+    id: crypto.randomBytes(12).toString('base64url'),
+    profile: structuredClone(profile),
+    providerId: provider?.id,
+    providerLabel: provider?.label,
+    createdAt: now,
+    lastUsedAt: now,
+  };
+  endpointHistory.set(record.id, record);
+  if (endpointHistory.size > MAX_HISTORY_ENTRIES) {
+    const oldest = [...endpointHistory.values()].sort((a, b) => a.lastUsedAt.localeCompare(b.lastUsedAt))[0];
+    if (oldest) endpointHistory.delete(oldest.id);
+  }
+  return record;
+}
+
+function historyMetadata(record: EndpointHistoryRecord) {
+  return {
+    id: record.id,
+    name: record.profile.name,
+    baseURL: record.profile.baseURL,
+    providerId: record.providerId,
+    providerLabel: record.providerLabel,
+    protocol: record.profile.protocol,
+    authMode: record.profile.authMode,
+    hasApiKey: Boolean(record.profile.apiKey),
+    createdAt: record.createdAt,
+    lastUsedAt: record.lastUsedAt,
+  };
+}
+
 function classifyStatus(status: number): string | undefined {
   if (status === 401 || status === 403) return 'auth';
   if (status === 404) return 'not_found';
@@ -71,15 +179,67 @@ function classifyStatus(status: number): string | undefined {
 app.post('/api/session/endpoints', async (req, res) => {
   try {
     for (const [token, endpoint] of endpoints) if (endpoint.expiresAt < Date.now()) endpoints.delete(token);
-    const base = normalizedBaseURL(req.body.baseURL);
-    const allowLocalNetwork = req.body.allowLocalNetwork === true;
-    await assertNetworkAllowed(base, allowLocalNetwork);
+    const requestedProfile = endpointProfile(req.body.profile ?? req.body);
+    const base = new URL(requestedProfile.baseURL);
+    await assertNetworkAllowed(base, requestedProfile.allowLocalNetwork);
+    const { profile, provider } = resolveProviderProfile(requestedProfile);
+    const history = upsertHistory(profile, provider);
     const token = crypto.randomBytes(24).toString('base64url');
-    endpoints.set(token, { baseURL: base.toString(), allowLocalNetwork, expiresAt: Date.now() + SESSION_TTL_MS });
-    res.json({ endpointToken: token, expiresInMs: SESSION_TTL_MS });
+    endpoints.set(token, {
+      baseURL: profile.baseURL,
+      allowLocalNetwork: profile.allowLocalNetwork,
+      historyId: history.id,
+      protocol: profile.protocol,
+      managedHeaders: buildAuthHeaders(profile.authMode, profile.apiKey, profile.customHeaderName, profile.customHeaderTemplate),
+      queryParams: Object.fromEntries(profile.queryParams.filter((item) => item.key.trim()).map((item) => [item.key.trim(), item.value])),
+      expiresAt: Date.now() + SESSION_TTL_MS,
+    });
+    res.set('Cache-Control', 'no-store, max-age=0');
+    res.json({
+      endpointToken: token,
+      expiresInMs: SESSION_TTL_MS,
+      history: historyMetadata(history),
+      configuration: {
+        name: profile.name,
+        baseURL: profile.baseURL,
+        protocol: profile.protocol,
+        authMode: profile.authMode,
+        customHeaderName: profile.customHeaderName,
+        customHeaderTemplate: profile.customHeaderTemplate,
+        queryParams: profile.queryParams,
+        providerId: provider?.id,
+        providerLabel: provider?.label,
+      },
+    });
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : '端点授权失败', errorType: 'blocked' });
   }
+});
+
+app.get('/api/session/history', (_req, res) => {
+  res.set('Cache-Control', 'no-store, max-age=0');
+  res.json({
+    history: [...endpointHistory.values()]
+      .sort((a, b) => b.lastUsedAt.localeCompare(a.lastUsedAt))
+      .map(historyMetadata),
+  });
+});
+
+app.post('/api/session/history/:id/restore', (req, res) => {
+  const record = endpointHistory.get(req.params.id);
+  res.set('Cache-Control', 'no-store, max-age=0');
+  if (!record) {
+    res.status(404).json({ error: '历史记录不存在；后端可能已重启或记录已被清理', errorType: 'not_found' });
+    return;
+  }
+  res.json({ profile: structuredClone(record.profile), history: historyMetadata(record) });
+});
+
+app.delete('/api/session/history', (_req, res) => {
+  endpointHistory.clear();
+  endpoints.clear();
+  res.set('Cache-Control', 'no-store, max-age=0');
+  res.json({ ok: true });
 });
 
 app.post('/api/proxy', async (req, res) => {
@@ -103,15 +263,18 @@ app.post('/api/proxy', async (req, res) => {
     if (target.origin !== base.origin || (basePath && !target.pathname.startsWith(`${basePath}/`) && target.pathname !== basePath)) {
       throw new Error('请求目标超出已授权端点范围');
     }
-    const queryParams = req.body.queryParams && typeof req.body.queryParams === 'object' ? req.body.queryParams : {};
-    for (const [key, value] of Object.entries(queryParams)) target.searchParams.set(key, String(value));
+    for (const [key, value] of Object.entries(endpoint.queryParams)) target.searchParams.set(key, value);
     const method = req.body.method === 'POST' ? 'POST' : 'GET';
-    const headers: Record<string, string> = { Accept: 'application/json' };
+    const requestHeaders: Record<string, string> = {};
     if (req.body.headers && typeof req.body.headers === 'object') {
       for (const [key, value] of Object.entries(req.body.headers)) {
-        if (!/^host$|^content-length$|^connection$/i.test(key)) headers[key] = String(value);
+        if (!/^(?:host|content-length|connection|authorization|proxy-authorization|api-key|x-api-key|x-goog-api-key)$/i.test(key)) {
+          requestHeaders[key] = String(value);
+        }
       }
     }
+    const protocolHeaders = endpoint.protocol === 'anthropic' ? { 'anthropic-version': '2023-06-01' } : undefined;
+    const headers = mergeHeaders({ Accept: 'application/json' }, requestHeaders, protocolHeaders, endpoint.managedHeaders);
     if (method === 'POST') headers['Content-Type'] = 'application/json';
 
     let currentTarget = target;
@@ -185,7 +348,20 @@ app.post('/api/proxy', async (req, res) => {
   }
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, maxResponseBytes: MAX_RESPONSE_BYTES }));
+app.get('/api/health', (_req, res) => {
+  res.set('Cache-Control', 'no-store, max-age=0');
+  res.json({
+    ok: true,
+    service: HEALTH_SERVICE,
+    guardVersion: GUARD_VERSION,
+    maxResponseBytes: MAX_RESPONSE_BYTES,
+    guards: {
+      localNetworkDefaultDenied: true,
+      sameOriginRedirects: true,
+      responseLimitEnforced: true,
+    },
+  });
+});
 
 const serverDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(serverDir, '../dist');

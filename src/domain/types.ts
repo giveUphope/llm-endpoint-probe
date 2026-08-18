@@ -10,7 +10,7 @@ export type ProtocolType =
   | 'openai-compatible'
   | 'manual';
 
-export type AuthMode = 'bearer' | 'api-key' | 'custom' | 'none';
+export type AuthMode = 'auto' | 'bearer' | 'api-key' | 'custom' | 'none';
 export type CapabilityValue = 'supported' | 'unsupported' | 'unknown' | 'inferred';
 export type EvidenceSource = 'endpoint' | 'validated' | 'inferred' | 'unknown' | 'user';
 export type Confidence = 'high' | 'medium' | 'low' | 'unknown';
@@ -132,6 +132,9 @@ export interface DiscoveryStep {
 export interface DiscoveryRun {
   id: string;
   endpointId: string;
+  endpointName?: string;
+  endpointBaseURL?: string;
+  endpointQueryParams?: KeyValue[];
   status: 'idle' | 'running' | 'success' | 'partial' | 'error' | 'cancelled';
   protocol?: ProtocolType;
   startedAt: string;
@@ -162,7 +165,6 @@ export interface ProxyRequest {
   path: string;
   method: 'GET' | 'POST';
   headers: Record<string, string>;
-  queryParams: Record<string, string>;
   body?: unknown;
   timeoutMs: number;
 }
