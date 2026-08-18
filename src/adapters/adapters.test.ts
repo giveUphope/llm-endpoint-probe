@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { buildGenerationProbe, classifyGenerationShape, extractEchoedModel, imageConsistencyFlags, sameModelName } from './shared';
 import { ollamaAdapter } from './ollama';
 import { cohereAdapter } from './cohere';
 import { geminiAdapter } from './gemini';
@@ -65,5 +66,54 @@ describe('protocol adapters', () => {
     const [model] = cohereAdapter.parseModels(payload);
     expect(model).toMatchObject({ id: 'command-test', contextWindow: 128000, protocol: 'cohere', supportedEndpoints: ['/v2/chat', '/v2/embed'] });
     expect(cohereAdapter.buildValidationRequest(model.id, 'supportsTopP')).toMatchObject({ path: '/v2/chat', body: { p: 1 } });
+  });
+
+  it('extracts the echoed model name across OpenAI, Cohere, Ollama and Gemini shapes', () => {
+    expect(extractEchoedModel({ model: 'gpt-4o', choices: [] })).toBe('gpt-4o');
+    expect(extractEchoedModel({ modelVersion: 'gemini-2.5-flash-001' })).toBe('gemini-2.5-flash-001');
+    expect(extractEchoedModel({ choices: [], model: '' })).toBeUndefined();
+    expect(extractEchoedModel('data: {"model":"ollama-fake"}')).toBeUndefined();
+  });
+
+  it('parses relay catalog endpoint types and vendor metadata', () => {
+    const [model] = openAIAdapter.parseModels({ data: [{
+      id: 'claude-sonnet-4-5', vendor_name: 'Claude', supported_endpoint_types: ['anthropic', 'openai'],
+    }] });
+    expect(model).toMatchObject({ vendor: 'Claude', endpointTypes: ['anthropic', 'openai'] });
+    const [fallback] = openAIAdapter.parseModels({ data: [{ id: 'deepseek-r1', owned_by: 'deepseek' }] });
+    expect(fallback.vendor).toBe('deepseek');
+  });
+
+  it('treats versioned echo names as the same model without over-matching', () => {
+    expect(sameModelName('gemini-2.5-flash', 'gemini-2.5-flash-001')).toBe(true);
+    expect(sameModelName('my-fake-model', 'gpt-4o')).toBe(false);
+    expect(sameModelName('gpt-4o', 'gpt-4o-mini')).toBe(false);
+  });
+
+  it('builds minimal generation probes for image, video and music interfaces', () => {
+    expect(buildGenerationProbe('image-generation', 'flux-pro')?.path).toBe('/images/generations');
+    expect(buildGenerationProbe('image-generation', 'flux-pro')?.body).toMatchObject({ model: 'flux-pro', n: 1, size: '256x256' });
+    expect(buildGenerationProbe('openai-video', 'veo3-pro')?.path).toBe('/videos/generations');
+    expect(buildGenerationProbe('openai-video', 'veo3-pro')?.body).toMatchObject({ model: 'veo3-pro' });
+    expect(buildGenerationProbe('music', 'suno-v3')?.path).toBe('/music/generations');
+    expect(buildGenerationProbe('doubao', 'x')).toBeNull();
+  });
+
+  it('fingerprints generation response shapes across upstream families', () => {
+    expect(classifyGenerationShape({ created: 1, data: [{ url: 'https://x/1.png' }] })).toMatchObject({ family: 'openai-images', imageCount: 1 });
+    expect(classifyGenerationShape({ created: 1, data: [{ b64_json: 'A'.repeat(400_000) }] })).toMatchObject({ family: 'openai-images', b64Length: 400_000 });
+    expect(classifyGenerationShape({ id: 'task-1', status: 'queued' })).toMatchObject({ family: 'async-task', taskStatus: 'queued' });
+    expect(classifyGenerationShape({ images: ['https://x/1.png'] })).toMatchObject({ family: 'image-array' });
+    expect(classifyGenerationShape({ output: ['https://x/1.png'] })).toMatchObject({ family: 'output-array' });
+    expect(classifyGenerationShape({ status: 'running' })).toMatchObject({ family: 'status-only' });
+    expect(classifyGenerationShape('data: {"ok":1}')).toMatchObject({ family: 'text' });
+    expect(classifyGenerationShape({ foo: 1 })).toMatchObject({ family: 'unknown' });
+  });
+
+  it('derives minimal-parameter honoring flags from the image shape', () => {
+    expect(imageConsistencyFlags({ family: 'openai-images', label: 'x', imageCount: 1, b64Length: 20_000 })).toEqual({ nHonored: true, sizeHonored: true });
+    expect(imageConsistencyFlags({ family: 'openai-images', label: 'x', imageCount: 3 })).toEqual({ nHonored: false });
+    expect(imageConsistencyFlags({ family: 'openai-images', label: 'x', b64Length: 400_000 })).toEqual({ sizeHonored: false });
+    expect(imageConsistencyFlags({ family: 'async-task', label: 'x' })).toEqual({});
   });
 });

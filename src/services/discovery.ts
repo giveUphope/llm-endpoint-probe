@@ -1,18 +1,36 @@
 import { adapterCandidates, adapterFor } from '../adapters';
+import {
+  ENDPOINT_TYPE_PROTOCOL,
+  GENERATION_INTERFACE_TYPES,
+  PROBE_FAKE_MODEL_ID,
+  buildGenerationProbe,
+  classifyGenerationShape,
+  extractEchoedModel,
+  imageConsistencyFlags,
+  interfaceLabel,
+  sameModelName,
+  type GenerationShape,
+} from '../adapters/shared';
 import { evidence, modelConfidence } from '../domain/capabilities';
 import type {
+  AdapterRequest,
   CapabilityKey,
   CapabilityStatus,
   DiscoveryRun,
   DiscoveryStep,
   DiscoveredModel,
   EndpointProfile,
+  GenerationCheck,
+  GenerationInterfaceCheck,
+  ModelNameCheck,
   ProbeErrorType,
   ProtocolAdapter,
+  ProtocolType,
   ProxyResponse,
   RequestRecord,
 } from '../domain/types';
 import { mergeHeaders, normalizeApiKey, redactHeaders, redactText, sanitizeData } from '../lib/security';
+import { buildPreview } from '../lib/preview';
 import { detectProvider } from '../lib/providers';
 import { uid } from '../lib/profile';
 import { authorizeEndpoint, ProbeError, proxyRequest } from './proxy';
@@ -124,6 +142,110 @@ export function describeHttpFailure(status: number, data: unknown, profile: Endp
   return providerMessage ? `${guidance}；服务端：${providerMessage}` : guidance;
 }
 
+export interface UpstreamErrorClassification {
+  kind: 'model_unavailable' | 'auth' | 'rate_limit' | 'balance' | 'server' | 'other';
+  label: string;
+}
+
+// 识别中转网关（New API / one-api 等）与通用上游的结构化错误，用于把“名称是否真实”的结论落到具体原因
+export function classifyUpstreamError(data: unknown, status: number): UpstreamErrorClassification {
+  if (status === 401 || status === 403) return { kind: 'auth', label: '认证被拒绝' };
+  if (status === 429) return { kind: 'rate_limit', label: '请求受限或限流' };
+  if (status >= 500) return { kind: 'server', label: '服务端错误' };
+  const root = record(data);
+  const error = record(root?.error);
+  const type = typeof error?.type === 'string' ? error.type : typeof root?.type === 'string' ? root.type : '';
+  const message = typeof error?.message === 'string'
+    ? error.message
+    : typeof root?.message === 'string' ? root.message : typeof root?.detail === 'string' ? root.detail : '';
+  const combined = `${type} ${message}`;
+  if (/new_api_error/i.test(type) || /模型不存在|无可用渠道|当前分组|没有可用|model.*not.*found|no.*channel/i.test(combined)) {
+    return { kind: 'model_unavailable', label: '网关判定该模型不存在或无可用渠道' };
+  }
+  if (/余额不足|额度不足|insufficient.*balance|quota/i.test(combined)) return { kind: 'balance', label: '账户余额或额度不足' };
+  if (/限流|频率|rate.?limit/i.test(combined)) return { kind: 'rate_limit', label: '请求受限或限流' };
+  return { kind: 'other', label: message ? `上游拒绝：${message.slice(0, 120)}` : '上游拒绝请求' };
+}
+
+// 目录声明的接口类型 → 协议；cohere/ollama/manual 等作为默认单接口
+const INTERFACE_PROTOCOL: Record<string, ProtocolType> = {
+  ...ENDPOINT_TYPE_PROTOCOL,
+  cohere: 'cohere',
+  ollama: 'ollama',
+  manual: 'manual',
+  llamacpp: 'llamacpp',
+  auto: 'openai-compatible',
+};
+
+const PROTOCOL_INTERFACE_KEY: Record<string, string> = {
+  'openai-compatible': 'openai',
+  'openai-chat': 'openai',
+  'openai-responses': 'openai-response',
+  anthropic: 'anthropic',
+  gemini: 'gemini',
+  cohere: 'cohere',
+  ollama: 'ollama',
+  manual: 'manual',
+  llamacpp: 'llamacpp',
+};
+
+// 模型实际可测的接口集合：默认来自识别出的协议，目录声明（endpointTypes）可追加更多接口
+export function modelInterfaces(model: DiscoveredModel): string[] {
+  const fromProtocol = PROTOCOL_INTERFACE_KEY[model.protocol] ?? model.protocol;
+  const declared = (model.endpointTypes ?? []).filter((type) => type in INTERFACE_PROTOCOL);
+  return [...new Set([fromProtocol, ...declared].filter((key): key is string => Boolean(key)))];
+}
+
+// 其中能构造最小探测请求的接口（用于验证对话框的请求数估计）
+export function modelProbeInterfaces(model: DiscoveredModel): string[] {
+  return modelInterfaces(model).filter((key) => Boolean(adapterFor(INTERFACE_PROTOCOL[key] ?? model.protocol).buildValidationRequest(PROBE_FAKE_MODEL_ID, 'supportsTemperature')));
+}
+
+// 模型声明且可做最小生成探测的绘图/音乐/视频接口
+export function modelGenerationInterfaces(model: DiscoveredModel): string[] {
+  const probeable = GENERATION_INTERFACE_TYPES as readonly string[];
+  return (model.endpointTypes ?? []).filter((type) => probeable.includes(type));
+}
+
+export function buildNameCheck(
+  requestedId: string,
+  echoes: string[],
+  probe: { accepted?: boolean; modelId: string; rejection?: string } | undefined,
+  checkedAt = new Date().toISOString(),
+  extra: { interfaces?: string[]; generationCheck?: GenerationCheck } = {},
+): ModelNameCheck {
+  const check: ModelNameCheck = { checkedAt };
+  if (extra.interfaces?.length) check.interfaces = extra.interfaces;
+  if (extra.generationCheck) check.generationCheck = extra.generationCheck;
+  const unique = [...new Set(echoes.map((echo) => echo.trim()).filter(Boolean))];
+  const mismatched = unique.find((echo) => !sameModelName(echo, requestedId));
+  if (mismatched) {
+    check.echoedModelId = mismatched;
+    check.aliased = true;
+  } else if (unique.length) {
+    check.echoedModelId = unique[0];
+    check.aliased = false;
+  }
+  if (probe) {
+    check.probeModelId = probe.modelId;
+    if (probe.accepted !== undefined) check.acceptsUnknownNames = probe.accepted;
+    if (probe.rejection) check.probeRejection = probe.rejection;
+  }
+  return check;
+}
+
+// 汇总各接口的虚假名探测结果：任一接口放行即整体宽松；全部拒绝则严格，优先给出“模型不存在”类原因
+export function aggregateProbe(outcomes: Array<{ accepted?: boolean; rejection?: string }>): { accepted?: boolean; rejection?: string } | undefined {
+  if (!outcomes.length) return undefined;
+  if (outcomes.some((item) => item.accepted === true)) return { accepted: true };
+  const rejections = outcomes.filter((item) => item.accepted === false);
+  if (rejections.length === outcomes.length) {
+    const unavailable = rejections.find((item) => /不存在|无可用渠道/.test(item.rejection ?? ''));
+    return { accepted: false, rejection: unavailable?.rejection ?? rejections[0]?.rejection };
+  }
+  return { accepted: undefined };
+}
+
 export function evaluateValidation(capability: CapabilityKey, response: ProxyResponse): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
   let observed = false;
   if (capability === 'supportsTools') observed = hasToolCall(response.data);
@@ -140,10 +262,32 @@ export function mergeValidationEvidence(
   result: { value: 'supported' | 'unsupported' | 'unknown'; confidence: 'high' | 'medium' | 'unknown'; detail: string },
 ): CapabilityStatus {
   const item = evidence('validated', result.confidence, result.detail);
+  // 验证产出真实证据后，移除能力矩阵里陈旧的“尚未探测”占位
+  const retained = previous.evidence.filter((entry) => entry.source !== 'unknown' || entry.detail !== '尚未探测');
   if (result.value === 'unknown' && previous.value !== 'unknown') {
-    return { ...previous, evidence: [...previous.evidence, item] };
+    return { ...previous, evidence: [...retained, item] };
   }
-  return { value: result.value, evidence: [...previous.evidence, item] };
+  return { value: result.value, evidence: [...retained, item] };
+}
+
+// 把“服务端明确拒绝参数”的原始报错按能力语义解释：
+// 拒绝强制工具选择不代表工具不可用；提示词缺 json 字样不代表 json 模式不可用；
+// response_format 类型不可用才是结构化输出不支持的直接证据
+export function interpretExplicitRejection(
+  capability: CapabilityKey,
+  message: string,
+  interfaceNote = '',
+): { value: 'unsupported' | 'unknown'; confidence: 'high' | 'medium' | 'unknown'; detail: string } {
+  if (capability === 'supportsTools' && /tool_choice|强制|forced/i.test(message)) {
+    return { value: 'unknown', confidence: 'medium', detail: `服务端拒绝强制工具选择（提示改用 tool_choice=auto）：工具能力可能仍受支持，但无法用强制选择方式确认${interfaceNote}` };
+  }
+  if (capability === 'supportsJsonMode' && /prompt|must contain|json.*word|json 字样/i.test(message)) {
+    return { value: 'unknown', confidence: 'medium', detail: `服务端拒绝原因为提示词未包含 json 字样（OpenAI 约束）：response_format=json_object 是否受支持未能确认${interfaceNote}` };
+  }
+  if (capability === 'supportsStructuredOutput' && /unavailable/i.test(message)) {
+    return { value: 'unsupported', confidence: 'medium', detail: `服务端返回 response_format 类型不可用：当前模型或上游暂不支持结构化输出${interfaceNote}` };
+  }
+  return { value: 'unsupported', confidence: 'medium', detail: `服务端明确拒绝参数${interfaceNote}：${message}` };
 }
 
 type RunUpdate = (run: DiscoveryRun) => void;
@@ -208,7 +352,7 @@ async function makeRequest(
     record.finalURL = response.finalURL;
     record.durationMs = response.durationMs;
     record.responseBytes = response.responseBytes;
-    record.responsePreview = sanitizeData(summarizeResponse(response.data), secrets);
+    record.responsePreview = sanitizeData(response.preview ?? buildPreview(response.data), secrets);
     if (!response.ok) {
       const errorType = ((response as unknown as { errorType?: ProbeErrorType }).errorType || 'network');
       const message = describeHttpFailure(response.status, response.data, profile);
@@ -374,6 +518,32 @@ async function pooled<T>(jobs: Array<() => Promise<T>>, limit: number): Promise<
   return results;
 }
 
+interface ProbeOutcome { accepted?: boolean; echo?: string; rejection?: string; shape?: GenerationShape }
+
+// 单次最小探测：2xx 视为接受；4xx（429 除外）记录拒绝原因；网络层失败视为未确认
+async function probeOnce(
+  run: DiscoveryRun,
+  endpointToken: string,
+  profile: EndpointProfile,
+  request: AdapterRequest,
+  signal: AbortSignal,
+  onRequest?: (request: RequestRecord) => void,
+): Promise<ProbeOutcome> {
+  try {
+    const response = await makeRequest(run, 'capabilities', endpointToken, profile, request, signal, () => {
+      const latest = run.requests.at(-1);
+      if (latest) onRequest?.(structuredClone(latest));
+    });
+    return { accepted: response.ok, echo: extractEchoedModel(response.data), shape: classifyGenerationShape(response.data) };
+  } catch (error) {
+    if (error instanceof ProbeError && error.type === 'cancelled') throw error;
+    if (error instanceof ProbeError && error.status && error.status >= 400 && error.status < 500 && error.status !== 429) {
+      return { accepted: false, rejection: classifyUpstreamError(error.details ?? error.message, error.status).label };
+    }
+    return { accepted: undefined };
+  }
+}
+
 export async function validateModel(
   profile: EndpointProfile,
   model: DiscoveredModel,
@@ -387,36 +557,104 @@ export async function validateModel(
   const authorization = await authorizeEndpoint(profile, signal);
   profile = authorization.profile;
   const endpointToken = authorization.endpointToken;
-  const adapter = adapterFor(model.protocol);
+  const chatInterfaces = modelInterfaces(model);
+  const generationInterfaces = modelGenerationInterfaces(model);
   const run = createRun(profile.id);
+  const echoes: string[] = [];
+  const probeOutcomes: Array<{ accepted?: boolean; rejection?: string }> = [];
+  const generationDetails: GenerationInterfaceCheck[] = [];
   try {
-    await pooled(capabilities.map((capability) => async () => {
-    const request = adapter.buildValidationRequest(model.id, capability);
-    if (!request) {
-      next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], { value: 'unknown', confidence: 'unknown', detail: '当前协议没有安全的最小验证方法' });
-      return;
+    const jobs: Array<() => Promise<void>> = [];
+    for (const interfaceKey of chatInterfaces) {
+      const adapter = adapterFor(INTERFACE_PROTOCOL[interfaceKey] ?? model.protocol);
+      const interfaceNote = chatInterfaces.length > 1 ? `（${interfaceLabel(interfaceKey)}）` : '';
+      for (const capability of capabilities) {
+        jobs.push(async () => {
+          const request = adapter.buildValidationRequest(model.id, capability);
+          if (!request) {
+            next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], { value: 'unknown', confidence: 'unknown', detail: `当前协议没有安全的最小验证方法${interfaceNote}` });
+            return;
+          }
+          try {
+            const response = await makeRequest(run, 'capabilities', endpointToken, profile, request, signal, () => {
+              const latest = run.requests.at(-1);
+              if (latest) onRequest?.(structuredClone(latest));
+            });
+            const echoed = extractEchoedModel(response.data);
+            if (echoed) echoes.push(echoed);
+            const outcome = evaluateValidation(capability, response);
+            next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], { ...outcome, detail: `${outcome.detail}（${request.method} ${request.path}${interfaceNote}）` });
+          } catch (error) {
+            const probe = error instanceof ProbeError ? error : new ProbeError('验证失败', 'network');
+            if (probe.type === 'cancelled') throw probe;
+            const explicitlyRejected = probe.status === 400 || probe.status === 422;
+            next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], explicitlyRejected
+              ? interpretExplicitRejection(capability, probe.message, interfaceNote)
+              : { value: 'unknown', confidence: 'unknown', detail: `无法判断${interfaceNote}：${probe.message}` });
+          }
+        });
+      }
+      // 对话类名称真实性探测：用虚假模型名发一次最小请求，判断网关是否对未知名称静默放行
+      const probeRequest = adapter.buildValidationRequest(PROBE_FAKE_MODEL_ID, 'supportsTemperature');
+      if (probeRequest) {
+        jobs.push(async () => {
+          const outcome = await probeOnce(run, endpointToken, profile, probeRequest, signal, onRequest);
+          if (outcome.accepted !== undefined || outcome.rejection) probeOutcomes.push({ accepted: outcome.accepted, rejection: outcome.rejection });
+        });
+      }
     }
-    try {
-      const response = await makeRequest(run, 'capabilities', endpointToken, profile, request, signal, () => {
-        const latest = run.requests.at(-1);
-        if (latest) onRequest?.(structuredClone(latest));
+    // 生成类接口（绘图/音乐/视频）名称一致性：真实名与虚假名各发一次最小生成请求
+    for (const interfaceType of generationInterfaces) {
+      jobs.push(async () => {
+        const fakeRequest = buildGenerationProbe(interfaceType, PROBE_FAKE_MODEL_ID);
+        const realRequest = buildGenerationProbe(interfaceType, model.id);
+        if (!fakeRequest || !realRequest) return;
+        const fake = await probeOnce(run, endpointToken, profile, fakeRequest, signal, onRequest);
+        const real = await probeOnce(run, endpointToken, profile, realRequest, signal, onRequest);
+        const detail: GenerationInterfaceCheck = {
+          interface: interfaceType,
+          realAccepted: real.accepted === true,
+          fakeAccepted: fake.accepted === true,
+        };
+        if (real.echo) {
+          detail.echo = real.echo;
+          echoes.push(real.echo);
+        }
+        if (real.rejection) detail.rejection = real.rejection;
+        if (real.shape) {
+          detail.realShape = real.shape.family;
+          Object.assign(detail, imageConsistencyFlags(real.shape));
+        }
+        if (fake.shape) detail.fakeShape = fake.shape.family;
+        if (real.shape && fake.shape) detail.shapeConsistent = real.shape.family === fake.shape.family;
+        generationDetails.push(detail);
       });
-      const outcome = evaluateValidation(capability, response);
-      next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], { ...outcome, detail: `${outcome.detail}（${request.method} ${request.path}）` });
-    } catch (error) {
-      const probe = error instanceof ProbeError ? error : new ProbeError('验证失败', 'network');
-      if (probe.type === 'cancelled') throw probe;
-      const explicitlyRejected = probe.status === 400 || probe.status === 422;
-      next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], explicitlyRejected
-        ? { value: 'unsupported', confidence: 'medium', detail: `服务端明确拒绝参数：${probe.message}` }
-        : { value: 'unknown', confidence: 'unknown', detail: `无法判断：${probe.message}` });
     }
-    }), 2);
+    await pooled(jobs, 2);
     next.status = 'validated';
   } catch (error) {
     if (!signal.aborted) throw error;
     next.status = 'partial';
   }
+  const probeVerdict = aggregateProbe(probeOutcomes);
+  const generationCheck: GenerationCheck | undefined = generationDetails.length
+    ? {
+        interfaces: generationDetails.map((detail) => detail.interface),
+        nameServed: generationDetails.every((detail) => detail.realAccepted),
+        permissive: generationDetails.some((detail) => detail.fakeAccepted),
+        details: generationDetails,
+      }
+    : undefined;
+  next.nameCheck = buildNameCheck(
+    model.id,
+    echoes,
+    probeVerdict ? { ...probeVerdict, modelId: PROBE_FAKE_MODEL_ID } : undefined,
+    new Date().toISOString(),
+    {
+      interfaces: [...chatInterfaces, ...generationInterfaces],
+      generationCheck,
+    },
+  );
   next.lastProbedAt = new Date().toISOString();
   next.confidence = modelConfidence(next);
   return next;

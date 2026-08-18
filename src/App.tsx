@@ -7,7 +7,7 @@ import { ModelsTable, type SortKey } from './components/ModelsTable';
 import { ProbeLog } from './components/ProbeLog';
 import type { CapabilityKey, DiscoveryRun, DiscoveredModel, EndpointProfile, RequestRecord } from './domain/types';
 import { createProfile, uid } from './lib/profile';
-import { discover, validateModel } from './services/discovery';
+import { discover, modelGenerationInterfaces, modelProbeInterfaces, validateModel } from './services/discovery';
 import { checkProxyHealth, clearEndpointHistory, listEndpointHistory, restoreEndpointHistory, type EndpointHistoryItem } from './services/proxy';
 
 const confidenceOrder = { unknown: 0, low: 1, medium: 2, high: 3 };
@@ -187,7 +187,7 @@ export default function App() {
       const requests = current.requests.some((item) => item.id === request.id) ? current.requests.map((item) => item.id === request.id ? request : item) : [...current.requests, request];
       return { ...current, requests };
     })).catch((error: Error) => { notify(`验证失败：${error.message}`); return null; });
-    if (result) { setRun((current) => current ? { ...current, models: current.models.map((item) => item.id === result.id ? result : item) } : current); notify(result.status === 'partial' ? '验证已取消，已保留完成的证据' : '模型能力验证完成'); }
+    if (result) { setRun((current) => current ? { ...current, models: current.models.map((item) => item.id === result.id ? result : item) } : current); notify(result.status === 'partial' ? '验证已取消，已保留完成的证据' : '模型能力验证完成（含名称真实性校验）'); }
   };
 
   const filteredModels = useMemo(() => {
@@ -216,7 +216,7 @@ export default function App() {
       </main>
       {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} canValidate={profile.allowValidation} onValidate={() => setValidationModel(selectedModel)} />}
     </div>
-    {validationModel && <ValidationDialog modelName={validationModel.displayName} onClose={() => setValidationModel(undefined)} onStart={runValidation} />}
+    {validationModel && <ValidationDialog modelName={validationModel.displayName} interfaces={modelProbeInterfaces(validationModel).length} generationInterfaces={modelGenerationInterfaces(validationModel).length} onClose={() => setValidationModel(undefined)} onStart={runValidation} />}
     {toast && <div className="toast"><Activity size={15} />{toast}</div>}
   </div>;
 }

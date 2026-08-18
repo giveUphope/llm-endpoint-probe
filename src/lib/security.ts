@@ -1,4 +1,4 @@
-const SENSITIVE_KEY = /^(?:authorization|proxy-authorization|api[-_]?key|x-(?:goog-)?api-key|access[-_]?token|refresh[-_]?token|token|secret|client[-_]?secret|password|cookie|set-cookie)$/i;
+export const SENSITIVE_KEY = /^(?:authorization|proxy-authorization|api[-_]?key|x-(?:goog-)?api-key|access[-_]?token|refresh[-_]?token|token|secret|client[-_]?secret|password|cookie|set-cookie)$/i;
 const BEARER = /Bearer\s+[A-Za-z0-9._~+\/-]+=*/gi;
 const MAX_METADATA_BYTES = 64 * 1024;
 

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import type { EndpointProfile, KeyValue } from '../src/domain/types';
+import { buildPreview } from '../src/lib/preview';
 import { resolveProviderProfile } from '../src/lib/providers';
 import { buildAuthHeaders, mergeHeaders } from '../src/lib/security';
 
@@ -326,6 +327,7 @@ app.post('/api/proxy', async (req, res) => {
       durationMs: Math.round(performance.now() - started),
       responseBytes: size,
       data,
+      preview: buildPreview(data),
       headers: {
         'content-type': upstream.headers.get('content-type') || '',
         'x-request-id': upstream.headers.get('x-request-id') || '',

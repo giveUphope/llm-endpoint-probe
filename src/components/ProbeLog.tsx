@@ -1,6 +1,7 @@
 import { AlertTriangle, Check, ChevronRight, Circle, Clock3, LoaderCircle, X } from 'lucide-react';
 import { useState } from 'react';
 import type { DiscoveryRun, RequestRecord } from '../domain/types';
+import { ResponsePreview } from './ResponsePreview';
 
 const StepIcon = ({ status }: { status: string }) => status === 'running' ? <LoaderCircle className="spin" size={15} /> : status === 'success' ? <Check size={15} /> : status === 'error' || status === 'cancelled' ? <X size={15} /> : status === 'warning' ? <AlertTriangle size={15} /> : <Circle size={12} />;
 
@@ -15,7 +16,7 @@ function RequestItem({ request }: { request: RequestRecord }) {
       {open && <div className="request-detail">
         <div><span>脱敏 Headers</span><pre>{JSON.stringify(request.requestHeaders, null, 2)}</pre></div>
         {request.requestBody != null && <div><span>请求体摘要</span><pre>{JSON.stringify(request.requestBody, null, 2)}</pre></div>}
-        <div><span>响应预览</span><pre>{request.errorMessage || JSON.stringify(request.responsePreview, null, 2)}</pre></div>
+        <div><span>响应预览</span>{request.errorMessage ? <pre>{request.errorMessage}</pre> : <ResponsePreview value={request.responsePreview} />}</div>
       </div>}
     </div>
   );
