@@ -155,6 +155,59 @@ function isStreamingResponse(response: ProxyResponse): boolean {
   return false;
 }
 
+// 提取响应正文文本（用于双探测对比 temperature / top_p / seed）
+function extractResponseText(data: unknown): string {
+  const content = outputContent(data);
+  if (typeof content === 'string') return content.trim();
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => typeof item === 'string' ? item : String(record(item)?.text ?? ''))
+      .join('')
+      .trim();
+  }
+  return '';
+}
+
+// 结构化输出 schema 一致性校验：要求响应 JSON 包含 schema 声明的 ok: boolean 字段；
+// 仅返回可解析 JSON 不足以证明 schema 约束实际生效
+function hasStructuredOutputSchemaConformance(data: unknown): boolean {
+  const content = outputContent(data);
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content) ? content.map((item) => typeof item === 'string' ? item : String(record(item)?.text ?? '')).join('') : '';
+  if (!text) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return typeof parsed?.ok === 'boolean';
+  } catch { return false; }
+}
+
+// 双探测比较：temperature / top_p 用不同参数值发两次请求，seed 用相同 seed 发两次请求
+// temperature/top_p：输出不同→参数生效；seed：输出相同→随机种子生效
+function evaluateDualProbe(capability: CapabilityKey, responses: ProxyResponse[]): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
+  const outputs = responses.map((response) => extractResponseText(response.data));
+  if (outputs.length < 2 || !outputs[0] || !outputs[1]) {
+    return { value: 'unknown', confidence: 'medium', detail: '双探测响应缺失，无法比较输出差异' };
+  }
+  const identical = outputs[0] === outputs[1];
+  if (capability === 'supportsSeed') {
+    return {
+      value: identical ? 'supported' : 'unknown',
+      confidence: 'high',
+      detail: identical
+        ? '相同 seed 下两次请求返回相同输出：随机种子生效'
+        : '相同 seed 下两次请求返回不同输出：随机种子可能被忽略',
+    };
+  }
+  return {
+    value: !identical ? 'supported' : 'unknown',
+    confidence: 'medium',
+    detail: !identical
+      ? '不同参数值下返回不同输出：参数实际生效'
+      : '不同参数值下返回相同输出：单次短响应不足以判定参数是否生效',
+  };
+}
+
 function upstreamErrorMessage(data: unknown): string | undefined {
   const root = record(data);
   const nested = record(root?.error);
@@ -301,14 +354,15 @@ export function aggregateProbe(outcomes: Array<{ accepted?: boolean; rejection?:
 
 // 默认探测使用的停止词；若出现在响应中则证明 stop 参数未被尊重
 
-export function evaluateValidation(capability: CapabilityKey, response: ProxyResponse): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
+export function evaluateValidation(capability: CapabilityKey, response: ProxyResponse | ProxyResponse[]): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
+  if (Array.isArray(response)) return evaluateDualProbe(capability, response);
   let observed = false;
   if (capability === 'supportsTools') observed = hasToolCall(response.data);
-  else if (capability === 'supportsJsonMode' || capability === 'supportsStructuredOutput') observed = isJsonOutput(response.data);
+  else if (capability === 'supportsJsonMode') observed = isJsonOutput(response.data);
+  else if (capability === 'supportsStructuredOutput') observed = hasStructuredOutputSchemaConformance(response.data);
   else if (capability === 'supportsStreaming') observed = isStreamingResponse(response);
   else if (capability === 'supportsReasoning') observed = hasReasoningContent(response.data);
   else if (capability === 'supportsStop') {
-    // 停止词出现→参数未被尊重；未出现→无法确认（模型可能本就未生成该词），保守返回 unknown
     return { value: 'unknown', confidence: 'medium',
       detail: containsStopSequence(response.data, DEFAULT_STOP_SEQUENCE)
         ? '停止词出现在输出中：stop 参数未被尊重'
@@ -646,20 +700,24 @@ export async function validateModel(
       const interfaceNote = chatInterfaces.length > 1 ? `（${interfaceLabel(interfaceKey)}）` : '';
       for (const capability of capabilities) {
         jobs.push(async () => {
-          const request = adapter.buildValidationRequest(model.id, capability);
-          if (!request) {
+          const requests = adapter.buildValidationRequest(model.id, capability);
+          if (!requests) {
             next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], { value: 'unknown', confidence: 'unknown', detail: `当前协议没有安全的最小验证方法${interfaceNote}` });
             return;
           }
           try {
-            const response = await makeRequest(run, 'capabilities', endpointToken, profile, request, signal, () => {
+            const requestList = Array.isArray(requests) ? requests : [requests];
+            const responses = await Promise.all(requestList.map((req) => makeRequest(run, 'capabilities', endpointToken, profile, req, signal, () => {
               const latest = run.requests.at(-1);
               if (latest) onRequest?.(structuredClone(latest));
+            })));
+            responses.forEach((response) => {
+              const echoed = extractEchoedModel(response.data);
+              if (echoed) echoes.push(echoed);
             });
-            const echoed = extractEchoedModel(response.data);
-            if (echoed) echoes.push(echoed);
-            const outcome = evaluateValidation(capability, response);
-            next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], { ...outcome, detail: `${outcome.detail}（${request.method} ${request.path}${interfaceNote}）` });
+            const outcome = evaluateValidation(capability, responses);
+            const methodAndPath = `${requestList[0].method} ${requestList[0].path}`;
+            next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], { ...outcome, detail: `${outcome.detail}（${methodAndPath}${interfaceNote}）` });
           } catch (error) {
             const probe = error instanceof ProbeError ? error : new ProbeError('验证失败', 'network');
             if (probe.type === 'cancelled') throw probe;
@@ -671,8 +729,9 @@ export async function validateModel(
         });
       }
       // 对话类名称真实性探测：用虚假模型名发一次最小请求，判断网关是否对未知名称静默放行
-      const probeRequest = adapter.buildValidationRequest(PROBE_FAKE_MODEL_ID, 'supportsTemperature');
-      if (probeRequest) {
+      const probeRequests = adapter.buildValidationRequest(PROBE_FAKE_MODEL_ID, 'supportsTemperature');
+      if (probeRequests) {
+        const probeRequest = Array.isArray(probeRequests) ? probeRequests[0] : probeRequests;
         jobs.push(async () => {
           const outcome = await probeOnce(run, endpointToken, profile, probeRequest, signal, onRequest);
           if (outcome.accepted !== undefined || outcome.rejection) probeOutcomes.push({ accepted: outcome.accepted, rejection: outcome.rejection });

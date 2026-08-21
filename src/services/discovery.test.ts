@@ -31,6 +31,38 @@ describe('active validation evidence', () => {
     expect(evaluateValidation('supportsJsonMode', response({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] })).value).toBe('supported');
   });
 
+  it('requires schema conformance for structured output, not just parseable JSON', () => {
+    expect(evaluateValidation('supportsStructuredOutput', response({ choices: [{ message: { content: '{"ok":true}' } }] })).value).toBe('supported');
+    expect(evaluateValidation('supportsStructuredOutput', response({ choices: [{ message: { content: '{"name":"foo"}' } }] })).value).toBe('unknown');
+    expect(evaluateValidation('supportsStructuredOutput', response({ candidates: [{ content: { parts: [{ text: '{"ok":false}' }] } }] })).value).toBe('supported');
+  });
+
+  it('compares dual-probe responses to determine temperature and top_p effectiveness', () => {
+    expect(evaluateValidation('supportsTemperature', [
+      response({ choices: [{ message: { content: 'creative version one' } }] }),
+      response({ choices: [{ message: { content: 'creative version two' } }] }),
+    ]).value).toBe('supported');
+    expect(evaluateValidation('supportsTemperature', [
+      response({ choices: [{ message: { content: 'same output' } }] }),
+      response({ choices: [{ message: { content: 'same output' } }] }),
+    ]).value).toBe('unknown');
+    expect(evaluateValidation('supportsTopP', [
+      response({ choices: [{ message: { content: 'high probability' } }] }),
+      response({ choices: [{ message: { content: 'narrow output' } }] }),
+    ]).value).toBe('supported');
+  });
+
+  it('compares seed responses to determine deterministic replay', () => {
+    expect(evaluateValidation('supportsSeed', [
+      response({ choices: [{ message: { content: 'deterministic output' } }] }),
+      response({ choices: [{ message: { content: 'deterministic output' } }] }),
+    ]).value).toBe('supported');
+    expect(evaluateValidation('supportsSeed', [
+      response({ choices: [{ message: { content: 'random one' } }] }),
+      response({ choices: [{ message: { content: 'random two' } }] }),
+    ]).value).toBe('unknown');
+  });
+
 it('recognizes event streams and keeps behavior-only parameters unknown', () => {
     expect(evaluateValidation('supportsStreaming', response('data: {"ok":true}', 'text/event-stream')).value).toBe('supported');
     expect(evaluateValidation('supportsStreaming', response('data: {"ok":true}')).value).toBe('supported');

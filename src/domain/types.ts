@@ -194,7 +194,7 @@ export interface ProtocolAdapter {
   discoveryRequests(baseURL: string): AdapterRequest[];
   recognizes(payload: unknown): boolean;
   parseModels(payload: unknown): DiscoveredModel[];
-  buildValidationRequest(modelId: string, capability: CapabilityKey): AdapterRequest | null;
+  buildValidationRequest(modelId: string, capability: CapabilityKey): AdapterRequest | AdapterRequest[] | null;
 }
 
 export interface ProxyRequest {

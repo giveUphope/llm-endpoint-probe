@@ -1,3 +1,4 @@
+import type { AdapterRequest } from '../domain/types';
 import { describe, expect, it } from 'vitest';
 import { buildGenerationProbe, classifyGenerationShape, extractEchoedModel, imageConsistencyFlags, sameModelName } from './shared';
 import { ollamaAdapter } from './ollama';
@@ -56,8 +57,8 @@ describe('protocol adapters', () => {
     const [model] = geminiAdapter.parseModels(payload);
     expect(model).toMatchObject({ id: 'gemini-test', displayName: 'Gemini Test', contextWindow: 1048576, maxOutputTokens: 8192, protocol: 'gemini' });
     expect(model.capabilities.supportsReasoning.value).toBe('supported');
-    expect(geminiAdapter.buildValidationRequest(model.id, 'supportsStreaming')?.path).toBe('/models/gemini-test:streamGenerateContent?alt=sse');
-    expect(geminiAdapter.buildValidationRequest(model.id, 'supportsTools')?.body).toMatchObject({ toolConfig: { functionCallingConfig: { mode: 'ANY' } } });
+    expect((geminiAdapter.buildValidationRequest(model.id, 'supportsStreaming') as AdapterRequest)?.path).toBe('/models/gemini-test:streamGenerateContent?alt=sse');
+    expect((geminiAdapter.buildValidationRequest(model.id, 'supportsTools') as AdapterRequest)?.body).toMatchObject({ toolConfig: { functionCallingConfig: { mode: 'ANY' } } });
   });
 
   it('parses Cohere models across its v1 catalog and v2 chat endpoints', () => {
@@ -65,7 +66,10 @@ describe('protocol adapters', () => {
     expect(cohereAdapter.recognizes(payload)).toBe(true);
     const [model] = cohereAdapter.parseModels(payload);
     expect(model).toMatchObject({ id: 'command-test', contextWindow: 128000, protocol: 'cohere', supportedEndpoints: ['/v2/chat', '/v2/embed'] });
-    expect(cohereAdapter.buildValidationRequest(model.id, 'supportsTopP')).toMatchObject({ path: '/v2/chat', body: { p: 1 } });
+    expect(cohereAdapter.buildValidationRequest(model.id, 'supportsTopP')).toEqual([
+      { method: 'POST', path: '/v2/chat', body: expect.objectContaining({ p: 1 }) },
+      { method: 'POST', path: '/v2/chat', body: expect.objectContaining({ p: 0.01 }) },
+    ]);
   });
 
   it('extracts the echoed model name across OpenAI, Cohere, Ollama and Gemini shapes', () => {
