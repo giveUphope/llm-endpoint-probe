@@ -15,6 +15,13 @@ describe('capability normalization', () => {
     expect(modelConfidence(result)).toBe('low');
   });
 
+it('recognizes qwq and reasoning variants as reasoning-capable', () => {
+    expect(inferCapabilities(model('qwq')).capabilities.supportsReasoning.value).toBe('inferred');
+    expect(inferCapabilities(model('qwq-32b')).capabilities.supportsReasoning.value).toBe('inferred');
+    expect(inferCapabilities(model('deepseek-r1-distill')).capabilities.supportsReasoning.value).toBe('inferred');
+    expect(inferCapabilities(model('gpt-5.5')).capabilities.supportsReasoning.value).toBe('unknown');
+  });
+
   it('keeps unknown models unknown', () => {
     const result = inferCapabilities(model('private-001'));
     expect(result.capabilities.supportsTools.value).toBe('unknown');

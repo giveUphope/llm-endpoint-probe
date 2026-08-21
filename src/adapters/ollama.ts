@@ -19,32 +19,53 @@ export const ollamaAdapter: ProtocolAdapter = {
   },
   buildValidationRequest: (modelId, capability) => {
     if (capability === 'supportsPromptCache' || capability === 'supportsStructuredOutput' || capability === 'supportsSeed' || capability === 'supportsReasoning') return null;
-    if (capability === 'supportsStreaming') return { method: 'POST', path: '/api/chat', body: { model: modelId, messages: [{ role: 'user', content: '回复 OK' }], stream: true, options: { num_predict: 8 } } };
+
+    const base: Record<string, unknown> = {
+      model: modelId,
+      messages: [{ role: 'user', content: '回复 OK' }],
+      stream: false,
+      options: { num_predict: 8 },
+    };
+
+    if (capability === 'supportsStreaming') {
+      return { method: 'POST', path: '/api/chat', body: { ...base, stream: true, options: { num_predict: 8 } } };
+    }
+
+    // 双探测：不同温度值 → 输出不同则参数生效
     if (capability === 'supportsTemperature') {
       return [
-        { method: 'POST', path: '/api/chat', body: { model: modelId, messages: [{ role: 'user', content: '回复 OK' }], options: { temperature: 0, num_predict: 8 } } },
-        { method: 'POST', path: '/api/chat', body: { model: modelId, messages: [{ role: 'user', content: CREATIVE_PROMPT }], options: { temperature: 1, num_predict: 32 } } },
+        { method: 'POST', path: '/api/chat', body: { ...base, messages: [{ role: 'user', content: CREATIVE_PROMPT }], options: { temperature: 0, num_predict: 8 } } },
+        { method: 'POST', path: '/api/chat', body: { ...base, messages: [{ role: 'user', content: CREATIVE_PROMPT }], options: { temperature: 1, num_predict: 8 } } },
       ];
     }
+
+    // 双探测：不同 top_p 值 → 输出不同则参数生效
     if (capability === 'supportsTopP') {
       return [
-        { method: 'POST', path: '/api/chat', body: { model: modelId, messages: [{ role: 'user', content: '回复 OK' }], options: { top_p: 1, num_predict: 8 } } },
-        { method: 'POST', path: '/api/chat', body: { model: modelId, messages: [{ role: 'user', content: CREATIVE_PROMPT }], options: { top_p: 0.01, num_predict: 32 } } },
+        { method: 'POST', path: '/api/chat', body: { ...base, messages: [{ role: 'user', content: CREATIVE_PROMPT }], options: { top_p: 1, num_predict: 8 } } },
+        { method: 'POST', path: '/api/chat', body: { ...base, messages: [{ role: 'user', content: CREATIVE_PROMPT }], options: { top_p: 0.01, num_predict: 8 } } },
       ];
     }
-    const options: Record<string, unknown> = { num_predict: 4 };
-    if (capability === 'supportsStop') options.stop = [DEFAULT_STOP_SEQUENCE];
-    const body: Record<string, unknown> = {
-      model: modelId,
-      messages: [{ role: 'user', content: capability === 'supportsJsonMode' ? '仅返回 {"ok":true}' : '回复 OK' }],
-      stream: false,
-      options: { ...options, num_predict: 8 },
-    };
-    if (capability === 'supportsJsonMode') body.format = 'json';
-    if (capability === 'supportsTools') {
-      body.tools = [{ type: 'function', function: { name: 'probe_noop', description: 'Do not call', parameters: { type: 'object', properties: {} } } }];
-      body.tool_choice = 'required';
+
+    if (capability === 'supportsStop') {
+      return { method: 'POST', path: '/api/chat', body: { ...base, options: { num_predict: 8, stop: [DEFAULT_STOP_SEQUENCE] } } };
     }
-    return { method: 'POST', path: '/api/chat', body };
+
+    if (capability === 'supportsJsonMode') {
+      return { method: 'POST', path: '/api/chat', body: { ...base, messages: [{ role: 'user', content: '仅返回 {"ok":true}' }], format: 'json' } };
+    }
+
+    // 工具能力：Ollama 不支持 tool_choice=required（部分模型会死循环），
+    // 改用 tool_choice=auto 配合引导 prompt，模型会自动决定是否调用
+    if (capability === 'supportsTools') {
+      return { method: 'POST', path: '/api/chat', body: {
+        ...base,
+        messages: [{ role: 'user', content: '用 probe_noop 工具回答' }],
+        tools: [{ type: 'function', function: { name: 'probe_noop', description: 'A probe tool', parameters: { type: 'object', properties: {} } } }],
+        tool_choice: 'auto',
+      } };
+    }
+
+    return { method: 'POST', path: '/api/chat', body: base };
   },
 };

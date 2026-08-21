@@ -10,20 +10,20 @@ function generationBodies(capability: CapabilityKey): Record<string, unknown> | 
 
   if (capability === 'supportsTemperature') {
     return [
-      { ...defaultContent, generationConfig: { maxOutputTokens: 32, temperature: 0 } },
-      { ...creativeContent, generationConfig: { maxOutputTokens: 32, temperature: 1 } },
+      { ...creativeContent, generationConfig: { maxOutputTokens: 8, temperature: 0 } },
+      { ...creativeContent, generationConfig: { maxOutputTokens: 8, temperature: 1 } },
     ];
   }
   if (capability === 'supportsTopP') {
     return [
-      { ...defaultContent, generationConfig: { maxOutputTokens: 32, topP: 1 } },
-      { ...creativeContent, generationConfig: { maxOutputTokens: 32, topP: 0.01 } },
+      { ...creativeContent, generationConfig: { maxOutputTokens: 8, topP: 1 } },
+      { ...creativeContent, generationConfig: { maxOutputTokens: 8, topP: 0.01 } },
     ];
   }
   if (capability === 'supportsSeed') {
     return [
-      { ...defaultContent, generationConfig: { maxOutputTokens: 8, seed: 1 } },
-      { ...defaultContent, generationConfig: { maxOutputTokens: 8, seed: 1 } },
+      { ...defaultContent, generationConfig: { maxOutputTokens: 16, seed: 1 } },
+      { ...defaultContent, generationConfig: { maxOutputTokens: 16, seed: 1 } },
     ];
   }
   if (capability === 'supportsPromptCache' || capability === 'supportsStructuredOutput') return null;

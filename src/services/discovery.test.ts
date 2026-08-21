@@ -222,6 +222,12 @@ describe('validation rejection interpretation', () => {
     expect(result.detail).toContain('结构化输出');
   });
 
+  it('flags xgrammar server dependency as unknown rather than unsupported', () => {
+    const result = interpretExplicitRejection('supportsStructuredOutput', 'HTTP 400；服务端：guided_grammar has compile_grammar_error: No module named xgrammar');
+    expect(result).toMatchObject({ value: 'unknown', confidence: 'medium' });
+    expect(result.detail).toContain('xgrammar');
+  });
+
   it('keeps the generic text for unrelated rejections', () => {
     const result = interpretExplicitRejection('supportsTemperature', 'HTTP 400；服务端：bad temperature');
     expect(result).toMatchObject({ value: 'unsupported', confidence: 'medium' });

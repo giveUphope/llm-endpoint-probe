@@ -404,6 +404,9 @@ export function interpretExplicitRejection(
   if (capability === 'supportsStructuredOutput' && /unavailable/i.test(message)) {
     return { value: 'unsupported', confidence: 'medium', detail: `服务端返回 response_format 类型不可用：当前模型或上游暂不支持结构化输出${interfaceNote}` };
   }
+  if (capability === 'supportsStructuredOutput' && /xgrammar|compile_grammar_error|guided_grammar/i.test(message)) {
+    return { value: 'unknown', confidence: 'medium', detail: `服务端 grammar 编译依赖缺失（xgrammar）：结构化输出能力可能受支持但服务端配置不完整，请安装 xgrammar 后重试${interfaceNote}` };
+  }
   return { value: 'unsupported', confidence: 'medium', detail: `服务端明确拒绝参数${interfaceNote}：${message}` };
 }
 

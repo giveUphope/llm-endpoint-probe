@@ -56,7 +56,8 @@ const inferenceRules: Array<{
   tools?: boolean;
 }> = [
   { test: /(?:vision|vl|gpt-4o|gemini|claude-3)/i, modalities: ['text', 'image'] },
-  { test: /(?:^|[-_.])(o1|o3|o4|r1|reasoner)(?:$|[-_.])/i, reasoning: true },
+  { test: /(?:^|[-_:.])(o1|o3|o4|r1|reasoner|qwq)(?:$|[-_:.])/i, reasoning: true },
+  { test: /(?:^|[-_:.])deepseek-r/i, reasoning: true },
   { test: /(?:gpt-4|gpt-5|claude|qwen|llama-3)/i, tools: true },
 ];
 

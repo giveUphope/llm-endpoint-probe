@@ -7,7 +7,7 @@ function chatBodies(modelId: string, capability: CapabilityKey): Record<string, 
   const base: Record<string, unknown> = {
     model: modelId,
     messages: [{ role: 'user', content: '回复 OK' }],
-    max_tokens: 16,
+    max_tokens: 8,
   };
 
   // 双探测：不同参数值发两次请求，比较输出差异
@@ -25,8 +25,8 @@ function chatBodies(modelId: string, capability: CapabilityKey): Record<string, 
   }
   if (capability === 'supportsSeed') {
     return [
-      { ...base, seed: 1 },
-      { ...base, seed: 1 },
+      { ...base, seed: 1, max_tokens: 16 },
+      { ...base, seed: 1, max_tokens: 16 },
     ];
   }
 
