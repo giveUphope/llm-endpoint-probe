@@ -5,14 +5,14 @@ describe('response preview digest', () => {
   it('keeps short strings inline and digests long text with head/tail samples', () => {
     expect(buildPreview('hello')).toEqual({ kind: 'scalar', value: 'hello' });
 
-    const long = `${'x'.repeat(2000)}\nsecond-line`;
+    const long = `${'x'.repeat(3000)}\nsecond-line`;
     const node = buildPreview(long) as { kind: 'text'; length: number; lines: number; head: string; tail: string };
     expect(node.kind).toBe('text');
-    expect(node.length).toBe(2012);
+    expect(node.length).toBe(3012);
     expect(node.lines).toBe(2);
-    expect(node.head).toBe('x'.repeat(1200));
+    expect(node.head).toBe('x'.repeat(2000));
     expect(node.tail.endsWith('second-line')).toBe(true);
-    expect(node.head.length + node.tail.length).toBeLessThan(2000);
+    expect(node.head.length + node.tail.length).toBeLessThan(3000);
   });
 
   it('caps arrays and objects while preserving the real totals', () => {

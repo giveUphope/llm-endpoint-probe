@@ -5,12 +5,12 @@ import { ResponsePreview } from './ResponsePreview';
 
 describe('ResponsePreview', () => {
   it('shows long text as a bounded sample instead of a full text wall', () => {
-    const text = `${'x'.repeat(2000)}\nsecond-line`;
+    const text = `${'x'.repeat(3000)}\nsecond-line`;
     render(<ResponsePreview value={text} />);
 
-    expect(screen.getAllByText(/2,012 字符/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/3,012 字符/).length).toBeGreaterThan(0);
     expect(screen.getByText('已截断')).toBeInTheDocument();
-    expect(screen.queryByText(/^x{2000}$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^x{3000}$/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '展开首尾' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '展开首尾' }));
@@ -37,9 +37,9 @@ describe('ResponsePreview', () => {
   });
 
   it('reports omitted items for capped arrays without dumping them', () => {
-    render(<ResponsePreview value={Array.from({ length: 45 }, (_, index) => index)} />);
+    render(<ResponsePreview value={Array.from({ length: 65 }, (_, index) => index)} />);
 
-    expect(screen.getByText(/数组 45 项/)).toBeInTheDocument();
+    expect(screen.getByText(/数组 65 项/)).toBeInTheDocument();
     expect(screen.getByText(/已省略 5 项/)).toBeInTheDocument();
     expect(screen.getByText('[0]')).toBeInTheDocument();
   });

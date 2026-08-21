@@ -1,12 +1,18 @@
-import { AlertTriangle, Check, ChevronRight, Circle, Clock3, LoaderCircle, X } from 'lucide-react';
+import { AlertTriangle, Check, ChevronRight, Circle, Clock3, FileJson, LoaderCircle, X } from 'lucide-react';
 import { useState } from 'react';
 import type { DiscoveryRun, RequestRecord } from '../domain/types';
 import { ResponsePreview } from './ResponsePreview';
 
 const StepIcon = ({ status }: { status: string }) => status === 'running' ? <LoaderCircle className="spin" size={15} /> : status === 'success' ? <Check size={15} /> : status === 'error' || status === 'cancelled' ? <X size={15} /> : status === 'warning' ? <AlertTriangle size={15} /> : <Circle size={12} />;
 
+function FormattedJson({ data }: { data: unknown }) {
+  return <pre className="raw-viewer" style={{ margin: '5px 0 0' }}>{JSON.stringify(data, null, 2)}</pre>;
+}
+
 function RequestItem({ request }: { request: RequestRecord }) {
   const [open, setOpen] = useState(false);
+  const [rawHeaders, setRawHeaders] = useState(false);
+  const [rawBody, setRawBody] = useState(false);
   return (
     <div className="request-item">
       <button className="request-summary" onClick={() => setOpen(!open)}>
@@ -14,8 +20,22 @@ function RequestItem({ request }: { request: RequestRecord }) {
         <span className="request-metrics">{request.status ?? '—'} · {request.durationMs ?? '—'}ms · {request.responseBytes != null ? `${Math.ceil(request.responseBytes / 1024)} KiB` : '—'}{request.retryCount ? ` · 重试 ${request.retryCount}` : ''}</span>
       </button>
       {open && <div className="request-detail">
-        <div><span>脱敏 Headers</span><pre>{JSON.stringify(request.requestHeaders, null, 2)}</pre></div>
-        {request.requestBody != null && <div><span>请求体摘要</span><pre>{JSON.stringify(request.requestBody, null, 2)}</pre></div>}
+        <div>
+          <span>
+            <FileJson size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+            脱敏 Headers
+            <button className="icon-button subtle" style={{ marginLeft: 6, verticalAlign: 'middle' }} onClick={() => setRawHeaders(!rawHeaders)} title="切换原始视图">原始</button>
+          </span>
+          {rawHeaders ? <FormattedJson data={request.requestHeaders} /> : <ResponsePreview value={request.requestHeaders} />}
+        </div>
+        {request.requestBody != null && <div>
+          <span>
+            <FileJson size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />
+            请求体摘要
+            <button className="icon-button subtle" style={{ marginLeft: 6, verticalAlign: 'middle' }} onClick={() => setRawBody(!rawBody)} title="切换原始视图">原始</button>
+          </span>
+          {rawBody ? <FormattedJson data={request.requestBody} /> : <ResponsePreview value={request.requestBody} />}
+        </div>}
         <div><span>响应预览</span>{request.errorMessage ? <pre>{request.errorMessage}</pre> : <ResponsePreview value={request.responsePreview} />}</div>
       </div>}
     </div>

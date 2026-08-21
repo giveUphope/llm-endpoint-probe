@@ -4,13 +4,13 @@ import { SENSITIVE_KEY } from './security';
 // 把任意上游响应转成有界、可逐项人工分析的树：长文本只保留首尾样本，
 // 数组/对象记录总数并只展开前若干项，任何节点都携带可展示的类型与体量信息。
 
-export const PREVIEW_SHORT_STRING = 200;
-export const PREVIEW_STRING_SAMPLE = 1_200;
-export const PREVIEW_STRING_TAIL = 400;
-export const PREVIEW_MAX_ENTRIES = 40;
-export const PREVIEW_MAX_ITEMS = 40;
-export const PREVIEW_MAX_DEPTH = 6;
-export const PREVIEW_MAX_NODES = 800;
+export const PREVIEW_SHORT_STRING = 300;
+export const PREVIEW_STRING_SAMPLE = 2_000;
+export const PREVIEW_STRING_TAIL = 600;
+export const PREVIEW_MAX_ENTRIES = 60;
+export const PREVIEW_MAX_ITEMS = 60;
+export const PREVIEW_MAX_DEPTH = 8;
+export const PREVIEW_MAX_NODES = 1_200;
 
 export interface PreviewScalar {
   kind: 'scalar';
