@@ -31,9 +31,27 @@ describe('active validation evidence', () => {
     expect(evaluateValidation('supportsJsonMode', response({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] })).value).toBe('supported');
   });
 
-  it('recognizes event streams and keeps behavior-only parameters unknown', () => {
+it('recognizes event streams and keeps behavior-only parameters unknown', () => {
     expect(evaluateValidation('supportsStreaming', response('data: {"ok":true}', 'text/event-stream')).value).toBe('supported');
+    expect(evaluateValidation('supportsStreaming', response('data: {"ok":true}')).value).toBe('supported');
+    expect(evaluateValidation('supportsStreaming', response([
+      { event: 'response.text.delta', data: '{"delta":"hi"}' },
+    ])).value).toBe('supported');
+    expect(evaluateValidation('supportsStreaming', response('event: message\ndata: {"text_delta":"hi"}')).value).toBe('supported');
+    expect(evaluateValidation('supportsStreaming', response({ choices: [] })).value).toBe('unknown');
     expect(evaluateValidation('supportsTemperature', response({ choices: [] }))).toMatchObject({ value: 'unknown', confidence: 'medium' });
+  });
+
+  it('detects reasoning content in the response before marking reasoning supported', () => {
+    expect(evaluateValidation('supportsReasoning', response({ choices: [{ message: { content: 'OK', reasoning_content: 'thinking step...' } }] })).value).toBe('supported');
+    expect(evaluateValidation('supportsReasoning', response({ candidates: [{ content: [{ type: 'thinking', text: 'thinking' }, { text: 'OK' }] }] })).value).toBe('supported');
+    expect(evaluateValidation('supportsReasoning', response({ choices: [{ message: { content: 'OK' } }] })).value).toBe('unknown');
+    expect(evaluateValidation('supportsReasoning', response({ thinking: 'reasoning text' })).value).toBe('supported');
+  });
+
+  it('reports stop-sequence observation without claiming definite support', () => {
+    expect(evaluateValidation('supportsStop', response({ choices: [{ message: { content: 'OK' } }] })).value).toBe('unknown');
+    expect(evaluateValidation('supportsStop', response({ choices: [{ message: { content: 'OK' } }] })).detail).toContain('无法确认');
   });
 
   it('does not erase endpoint declarations when validation is inconclusive', () => {

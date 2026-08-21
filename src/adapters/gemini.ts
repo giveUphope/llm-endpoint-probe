@@ -1,6 +1,6 @@
 import { evidence, modelConfidence } from '../domain/capabilities';
 import type { AdapterRequest, CapabilityKey, ProtocolAdapter } from '../domain/types';
-import { normalizeModel, records } from './shared';
+import { DEFAULT_STOP_SEQUENCE, normalizeModel, records } from './shared';
 
 function generationBody(capability: CapabilityKey): Record<string, unknown> {
   const generationConfig: Record<string, unknown> = { maxOutputTokens: 8 };
@@ -24,7 +24,7 @@ function generationBody(capability: CapabilityKey): Record<string, unknown> {
   if (capability === 'supportsReasoning') generationConfig.thinkingConfig = { thinkingBudget: 128 };
   if (capability === 'supportsTemperature') generationConfig.temperature = 0;
   if (capability === 'supportsTopP') generationConfig.topP = 1;
-  if (capability === 'supportsStop') generationConfig.stopSequences = ['NEVER_EMIT_THIS'];
+  if (capability === 'supportsStop') generationConfig.stopSequences = [DEFAULT_STOP_SEQUENCE];
   if (capability === 'supportsSeed') generationConfig.seed = 1;
   return body;
 }

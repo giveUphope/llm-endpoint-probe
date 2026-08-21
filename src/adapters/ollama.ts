@@ -1,5 +1,5 @@
 import type { ProtocolAdapter } from '../domain/types';
-import { normalizeModel, records } from './shared';
+import { DEFAULT_STOP_SEQUENCE, normalizeModel, records } from './shared';
 
 export const ollamaAdapter: ProtocolAdapter = {
   id: 'ollama',
@@ -20,7 +20,7 @@ export const ollamaAdapter: ProtocolAdapter = {
     const options: Record<string, unknown> = { num_predict: 4 };
     if (capability === 'supportsTemperature') options.temperature = 0;
     if (capability === 'supportsTopP') options.top_p = 1;
-    if (capability === 'supportsStop') options.stop = ['NEVER_EMIT_THIS'];
+    if (capability === 'supportsStop') options.stop = [DEFAULT_STOP_SEQUENCE];
     const body: Record<string, unknown> = {
       model: modelId,
       messages: [{ role: 'user', content: capability === 'supportsJsonMode' ? '仅返回 {"ok":true}' : '回复 OK' }],
@@ -28,7 +28,10 @@ export const ollamaAdapter: ProtocolAdapter = {
       options: { ...options, num_predict: 8 },
     };
     if (capability === 'supportsJsonMode') body.format = 'json';
-    if (capability === 'supportsTools') body.tools = [{ type: 'function', function: { name: 'probe_noop', description: 'Do not call', parameters: { type: 'object', properties: {} } } }];
+    if (capability === 'supportsTools') {
+      body.tools = [{ type: 'function', function: { name: 'probe_noop', description: 'Do not call', parameters: { type: 'object', properties: {} } } }];
+      body.tool_choice = 'required';
+    }
     return { method: 'POST', path: '/api/chat', body };
   },
 };

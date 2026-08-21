@@ -1,5 +1,5 @@
 import type { AdapterRequest, CapabilityKey, ProtocolAdapter } from '../domain/types';
-import { normalizeModel, records } from './shared';
+import { DEFAULT_STOP_SEQUENCE, normalizeModel, records } from './shared';
 
 function chatBody(modelId: string, capability: CapabilityKey): Record<string, unknown> {
   const body: Record<string, unknown> = { model: modelId, messages: [{ role: 'user', content: '回复 OK' }], max_tokens: 8 };
@@ -17,7 +17,7 @@ function chatBody(modelId: string, capability: CapabilityKey): Record<string, un
   }
   if (capability === 'supportsTemperature') body.temperature = 0;
   if (capability === 'supportsTopP') body.p = 1;
-  if (capability === 'supportsStop') body.stop_sequences = ['NEVER_EMIT_THIS'];
+  if (capability === 'supportsStop') body.stop_sequences = [DEFAULT_STOP_SEQUENCE];
   if (capability === 'supportsSeed') body.seed = 1;
   if (capability === 'supportsStreaming') body.stream = true;
   return body;

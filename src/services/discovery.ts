@@ -3,6 +3,7 @@ import {
   ENDPOINT_TYPE_PROTOCOL,
   GENERATION_INTERFACE_TYPES,
   PROBE_FAKE_MODEL_ID,
+  DEFAULT_STOP_SEQUENCE,
   buildGenerationProbe,
   classifyGenerationShape,
   extractEchoedModel,
@@ -104,6 +105,54 @@ function isJsonOutput(data: unknown): boolean {
     : Array.isArray(content) ? content.map((item) => typeof item === 'string' ? item : String(record(item)?.text ?? '')).join('') : '';
   if (!text) return false;
   try { return Boolean(JSON.parse(text)); } catch { return false; }
+}
+
+// 检查响应中是否存在推理/思考痕迹：OpenAI 的 reasoning_content / thinking_blocks，
+// Anthropic 的 thinking，Gemini 的 thinking；存在则证明推理参数实际生效
+function hasReasoningContent(data: unknown): boolean {
+  const root = record(data);
+  if (root?.thinking != null && root.thinking !== '') return true;
+  const choices = Array.isArray(root?.choices) ? root.choices : [];
+  const message = record(record(choices[0])?.message) ?? record(root?.message);
+  if (typeof message?.reasoning_content === 'string' && message.reasoning_content.trim()) return true;
+  if (Array.isArray(message?.thinking_blocks) && message.thinking_blocks.length > 0) return true;
+  if (typeof message?.reasoning === 'string' && message.reasoning.trim()) return true;
+  const candidates = Array.isArray(root?.candidates) ? root.candidates : [];
+  const candidate = candidates[0];
+  if (typeof record(candidate)?.thinking === 'string' && record(candidate)?.thinking) return true;
+  const candidateContent: unknown[] = Array.isArray(record(candidate)?.content) ? (record(candidate)!.content as unknown[]) : [];
+  if (candidateContent.some((item: unknown) => record(item)?.type === 'thinking')) return true;
+  return false;
+}
+
+// 检查响应文本是否包含指定的停止词：若出现则证明 stop 参数未被尊重
+function containsStopSequence(data: unknown, sequence: string): boolean {
+  const content = outputContent(data);
+  if (!content) return false;
+  if (typeof content === 'string') return content.includes(sequence);
+  if (Array.isArray(content)) {
+    return content.some((item: unknown) => {
+      if (typeof item === 'string') return item.includes(sequence);
+      const r = record(item);
+      const text = typeof r?.text === 'string' ? r.text : '';
+      return text.includes(sequence);
+    });
+  }
+  return false;
+}
+
+// 改进流式检测：覆盖标准 SSE、OpenAI Responses API 事件格式以及已缓冲的数组形式
+function isStreamingResponse(response: ProxyResponse): boolean {
+  if (response.headers['content-type']?.includes('text/event-stream')) return true;
+  if (typeof response.data === 'string' && /(^|\n)data:/.test(response.data)) return true;
+  if (typeof response.data === 'string' && /event:|response\.text\.delta/i.test(response.data)) return true;
+  if (Array.isArray(response.data)) {
+    return response.data.some((item) => {
+      const r = record(item);
+      return typeof r?.event === 'string' || typeof r?.type === 'string' || typeof r?.data === 'string';
+    });
+  }
+  return false;
 }
 
 function upstreamErrorMessage(data: unknown): string | undefined {
@@ -250,11 +299,21 @@ export function aggregateProbe(outcomes: Array<{ accepted?: boolean; rejection?:
   return { accepted: undefined };
 }
 
+// 默认探测使用的停止词；若出现在响应中则证明 stop 参数未被尊重
+
 export function evaluateValidation(capability: CapabilityKey, response: ProxyResponse): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
   let observed = false;
   if (capability === 'supportsTools') observed = hasToolCall(response.data);
   else if (capability === 'supportsJsonMode' || capability === 'supportsStructuredOutput') observed = isJsonOutput(response.data);
-  else if (capability === 'supportsStreaming') observed = response.headers['content-type']?.includes('text/event-stream') || (typeof response.data === 'string' && /(^|\n)data:/.test(response.data));
+  else if (capability === 'supportsStreaming') observed = isStreamingResponse(response);
+  else if (capability === 'supportsReasoning') observed = hasReasoningContent(response.data);
+  else if (capability === 'supportsStop') {
+    // 停止词出现→参数未被尊重；未出现→无法确认（模型可能本就未生成该词），保守返回 unknown
+    return { value: 'unknown', confidence: 'medium',
+      detail: containsStopSequence(response.data, DEFAULT_STOP_SEQUENCE)
+        ? '停止词出现在输出中：stop 参数未被尊重'
+        : '停止词未出现在输出中：无法确认 stop 参数是否实际生效（单次短响应不足以判定）' };
+  }
   else return { value: 'unknown', confidence: 'medium', detail: '服务端接受了参数，但单次最小请求无法确认参数是否实际生效' };
   return observed
     ? { value: 'supported', confidence: 'high', detail: '请求成功并观察到预期响应结构' }

@@ -233,6 +233,9 @@ export function records(value: unknown): Record<string, unknown>[] {
 // 用于探测端点是否对未知模型名静默放行的虚假模型名
 export const PROBE_FAKE_MODEL_ID = 'zcode-probe-nonexistent-model';
 
+// 停止词探测默认值；若出现在响应输出中则证明 stop 参数未被尊重
+export const DEFAULT_STOP_SEQUENCE = 'ZCODE_STOP_SEQUENCE_HERE';
+
 // 提取端点响应中实际回显的模型名；依次检查 data.model / modelVersion / choices[0].message.model，
 // 覆盖 OpenAI / Cohere / Ollama / Gemini / OpenRouter 中继等主流响应形状；SSE 流字符串不提取
 export function extractEchoedModel(data: unknown): string | undefined {

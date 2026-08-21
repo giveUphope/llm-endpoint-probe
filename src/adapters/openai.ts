@@ -1,5 +1,5 @@
 import type { AdapterRequest, CapabilityKey, ProtocolAdapter } from '../domain/types';
-import { normalizeModel, records } from './shared';
+import { DEFAULT_STOP_SEQUENCE, normalizeModel, records } from './shared';
 
 function chatBody(modelId: string, capability: CapabilityKey): Record<string, unknown> {
   const body: Record<string, unknown> = {
@@ -17,7 +17,7 @@ function chatBody(modelId: string, capability: CapabilityKey): Record<string, un
     supportsReasoning: { reasoning_effort: 'low' },
     supportsTemperature: { temperature: 0 },
     supportsTopP: { top_p: 1 },
-    supportsStop: { stop: ['NEVER_EMIT_THIS'] },
+    supportsStop: { stop: [DEFAULT_STOP_SEQUENCE] },
     supportsSeed: { seed: 1 },
     supportsStreaming: { stream: true },
   };
