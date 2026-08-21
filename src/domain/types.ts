@@ -63,6 +63,7 @@ export interface GenerationInterfaceCheck {
   fakeShape?: string; // 虚假名响应的结构族
   shapeConsistent?: boolean; // 真实名与虚假名响应结构是否同族（同族→疑似同一默认上游）
   echo?: string; // 真实名响应回显的模型名（如有）
+  contentMatch?: boolean; // 真实名与虚假名响应内容是否高度相似（排除非确定性字段后）
   nHonored?: boolean; // 请求 n=1 是否被尊重（返回 1 张图）
   sizeHonored?: boolean; // 请求 256x256 是否被尊重（b64 长度未超阈值）
 }

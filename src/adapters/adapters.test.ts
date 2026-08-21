@@ -71,6 +71,9 @@ describe('protocol adapters', () => {
   it('extracts the echoed model name across OpenAI, Cohere, Ollama and Gemini shapes', () => {
     expect(extractEchoedModel({ model: 'gpt-4o', choices: [] })).toBe('gpt-4o');
     expect(extractEchoedModel({ modelVersion: 'gemini-2.5-flash-001' })).toBe('gemini-2.5-flash-001');
+    expect(extractEchoedModel({ choices: [{ model: 'relay-model-echo' }] })).toBe('relay-model-echo');
+    expect(extractEchoedModel({ choices: [{ message: { content: 'ok', model: 'nested-model-echo' } }] })).toBe('nested-model-echo');
+    expect(extractEchoedModel({ model: '', choices: [{ model: 'fallback-echo' }] })).toBe('fallback-echo');
     expect(extractEchoedModel({ choices: [], model: '' })).toBeUndefined();
     expect(extractEchoedModel('data: {"model":"ollama-fake"}')).toBeUndefined();
   });
@@ -86,8 +89,12 @@ describe('protocol adapters', () => {
 
   it('treats versioned echo names as the same model without over-matching', () => {
     expect(sameModelName('gemini-2.5-flash', 'gemini-2.5-flash-001')).toBe(true);
+    expect(sameModelName('gemini-2.5-flash', 'gemini-2.5-flash-2024-08-06')).toBe(true);
     expect(sameModelName('my-fake-model', 'gpt-4o')).toBe(false);
     expect(sameModelName('gpt-4o', 'gpt-4o-mini')).toBe(false);
+    expect(sameModelName('llama-3', 'llama-3-8b')).toBe(false);
+    expect(sameModelName('qwen-2.5', 'qwen-2.5-coder')).toBe(false);
+    expect(sameModelName('gpt-4', 'gpt-4-turbo')).toBe(false);
   });
 
   it('builds minimal generation probes for image, video and music interfaces', () => {

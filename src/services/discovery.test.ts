@@ -117,7 +117,8 @@ describe('multi-interface model probing', () => {
     expect(aggregateProbe([])).toBeUndefined();
     expect(aggregateProbe([{ accepted: true }])).toEqual({ accepted: true });
     expect(aggregateProbe([{ accepted: false, rejection: '网关判定该模型不存在或无可用渠道' }])).toEqual({ accepted: false, rejection: '网关判定该模型不存在或无可用渠道' });
-    expect(aggregateProbe([{ accepted: false, rejection: '限流' }, { accepted: undefined }])).toEqual({ accepted: undefined });
+    expect(aggregateProbe([{ accepted: false, rejection: '限流' }, { accepted: undefined }])).toEqual({ accepted: false, rejection: '限流' });
+    expect(aggregateProbe([{ accepted: undefined }, { accepted: undefined }])).toBeUndefined();
   });
 
   it('records tested interfaces and the rejection reason in the name check', () => {

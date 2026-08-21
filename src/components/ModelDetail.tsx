@@ -41,6 +41,7 @@ export function ModelDetail({ model, requests, onClose, onValidate, canValidate 
                     {detail.realAccepted ? '真实名可用' : detail.rejection ? `真实名被拒（${detail.rejection}）` : '真实名未确认'} · {detail.fakeAccepted ? '虚假名放行' : '虚假名未放行'}
                   </strong>
                   {detail.realShape && <div className="name-check-sub">真实名结构：{detail.realShape}{detail.fakeShape ? `；虚假名结构：${detail.fakeShape}` : ''}{detail.shapeConsistent === false ? '（不一致）' : detail.shapeConsistent === true ? '（一致）' : ''}</div>}
+                  {detail.contentMatch === true ? <div className="name-check-sub">响应内容一致：真实名与虚假名返回完全相同的输出，强烈指向同一上游</div> : detail.contentMatch === false ? <div className="name-check-sub">响应内容不同：真实名与虚假名返回了不同的输出，名称可能生效</div> : null}
                   {detail.interface === 'image-generation' && (detail.nHonored === false || detail.sizeHonored === false) && <div className="name-check-sub">未尊重最小参数（{detail.nHonored === false ? '返回多图' : ''}{detail.nHonored === false && detail.sizeHonored === false ? '、' : ''}{detail.sizeHonored === false ? '疑似大尺寸图' : ''}）</div>}
                   {detail.echo && <div className="name-check-sub">回显型号：{detail.echo}</div>}
                 </div>

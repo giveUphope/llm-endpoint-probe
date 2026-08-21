@@ -233,22 +233,31 @@ export function records(value: unknown): Record<string, unknown>[] {
 // 用于探测端点是否对未知模型名静默放行的虚假模型名
 export const PROBE_FAKE_MODEL_ID = 'zcode-probe-nonexistent-model';
 
-// 提取端点响应中实际回显的模型名；OpenAI/Cohere/Ollama 等回显在 data.model，Gemini 在 modelVersion
+// 提取端点响应中实际回显的模型名；依次检查 data.model / modelVersion / choices[0].message.model，
+// 覆盖 OpenAI / Cohere / Ollama / Gemini / OpenRouter 中继等主流响应形状；SSE 流字符串不提取
 export function extractEchoedModel(data: unknown): string | undefined {
   const root = data && typeof data === 'object' ? data as Record<string, unknown> : undefined;
   if (!root) return undefined;
   if (typeof root.model === 'string' && root.model.trim()) return root.model.trim();
   if (typeof root.modelVersion === 'string' && root.modelVersion.trim()) return root.modelVersion.trim();
+  const choices = Array.isArray(root.choices) ? root.choices : [];
+  const firstChoice = choices[0] && typeof choices[0] === 'object' ? choices[0] as Record<string, unknown> : undefined;
+  if (typeof firstChoice?.model === 'string' && firstChoice.model.trim()) return firstChoice.model.trim();
+  const message = firstChoice?.message && typeof firstChoice.message === 'object'
+    ? firstChoice.message as Record<string, unknown>
+    : undefined;
+  if (typeof message?.model === 'string' && message.model.trim()) return message.model.trim();
   return undefined;
 }
 
-// 回显名与请求名是否指向同一型号；Gemini 等会回显版本化全名（如 gemini-2.5-flash-001），
-// 仅当后接部分形如版本号（-001 / -2024-08-06 / -v1）时视为同一型号，避免 gpt-4o 与 gpt-4o-mini 误判
+// 回显名与请求名是否指向同一型号；Gemini 等会回显版本化全名（如 gemini-2.5-flash-001）。
+// 仅当两个名存在前缀关系，且后接部分纯粹是版本号（数字、点、连字符、v）时视为同一型号；
+// 形如 gpt-4o-mini / llama-3-8b / qwen-2.5-coder 等含字母的变体后缀会被正确区分
 export function sameModelName(a: string, b: string): boolean {
   const x = a.toLowerCase();
   const y = b.toLowerCase();
   if (x === y) return true;
   const suffix = x.startsWith(y) ? x.slice(y.length) : y.startsWith(x) ? y.slice(x.length) : undefined;
   if (!suffix) return false;
-  return /^[-.\dv]+$/i.test(suffix);
+  return /^[-.v]*\d+[-.v\d]*$/.test(suffix);
 }

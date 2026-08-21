@@ -234,12 +234,16 @@ export function buildNameCheck(
   return check;
 }
 
-// 汇总各接口的虚假名探测结果：任一接口放行即整体宽松；全部拒绝则严格，优先给出“模型不存在”类原因
+// 汇总各接口的虚假名探测结果：429 限流（accepted=undefined）不参与判定；
+// 排除限流后，任一接口放行即整体宽松；全部拒绝则严格，优先给出“模型不存在”类原因；
+// 若所有结果均为限流则保持未知，不做出确定性结论
 export function aggregateProbe(outcomes: Array<{ accepted?: boolean; rejection?: string }>): { accepted?: boolean; rejection?: string } | undefined {
   if (!outcomes.length) return undefined;
-  if (outcomes.some((item) => item.accepted === true)) return { accepted: true };
-  const rejections = outcomes.filter((item) => item.accepted === false);
-  if (rejections.length === outcomes.length) {
+  const definite = outcomes.filter((item) => item.accepted !== undefined);
+  if (!definite.length) return undefined;
+  if (definite.some((item) => item.accepted === true)) return { accepted: true };
+  const rejections = definite.filter((item) => item.accepted === false);
+  if (rejections.length === definite.length) {
     const unavailable = rejections.find((item) => /不存在|无可用渠道/.test(item.rejection ?? ''));
     return { accepted: false, rejection: unavailable?.rejection ?? rejections[0]?.rejection };
   }
@@ -518,7 +522,20 @@ async function pooled<T>(jobs: Array<() => Promise<T>>, limit: number): Promise<
   return results;
 }
 
-interface ProbeOutcome { accepted?: boolean; echo?: string; rejection?: string; shape?: GenerationShape }
+interface ProbeOutcome { accepted?: boolean; echo?: string; rejection?: string; shape?: GenerationShape; contentHash?: string }
+
+// 轻量内容指纹：排除 id/timestamp/status 等非确定性字段后对响应结构做哈希，
+// 用于判断真实名与虚假名请求是否返回了相同的上游输出（非确定性字段被排除，
+// 因此仅当响应内容确实一致时才匹配，非确定性内容自动判为不匹配）
+function contentHash(data: unknown): string {
+  const root = data && typeof data === 'object' ? data as Record<string, unknown> : data;
+  if (!root || typeof root !== 'object') return typeof data === 'string' ? data.slice(0, 80) : '';
+  const stripped: Record<string, unknown> = { ...root };
+  for (const key of ['id', 'timestamp', 'created', 'created_at']) {
+    if (key in stripped) delete stripped[key];
+  }
+  return JSON.stringify(stripped).slice(0, 200);
+}
 
 // 单次最小探测：2xx 视为接受；4xx（429 除外）记录拒绝原因；网络层失败视为未确认
 async function probeOnce(
@@ -534,7 +551,7 @@ async function probeOnce(
       const latest = run.requests.at(-1);
       if (latest) onRequest?.(structuredClone(latest));
     });
-    return { accepted: response.ok, echo: extractEchoedModel(response.data), shape: classifyGenerationShape(response.data) };
+    return { accepted: response.ok, echo: extractEchoedModel(response.data), shape: classifyGenerationShape(response.data), contentHash: contentHash(response.data) };
   } catch (error) {
     if (error instanceof ProbeError && error.type === 'cancelled') throw error;
     if (error instanceof ProbeError && error.status && error.status >= 400 && error.status < 500 && error.status !== 429) {
@@ -627,6 +644,9 @@ export async function validateModel(
         }
         if (fake.shape) detail.fakeShape = fake.shape.family;
         if (real.shape && fake.shape) detail.shapeConsistent = real.shape.family === fake.shape.family;
+        if (real.contentHash && fake.contentHash && real.contentHash.length > 10 && fake.contentHash.length > 10) {
+          detail.contentMatch = real.contentHash === fake.contentHash;
+        }
         generationDetails.push(detail);
       });
     }

@@ -141,4 +141,31 @@ describe('ModelDetail model name verification', () => {
     expect(screen.getByText('绘图接口上虚假名与真实名返回相同结构：请求可能都被路由到同一默认上游，名称真实性存疑。')).toBeInTheDocument();
     expect(screen.getByText('绘图接口回显型号与请求名不一致：名称疑似别名，真实型号可能为回显值。')).toBeInTheDocument();
   });
+
+  it('displays content-match signals when real and fake responses differ in content', () => {
+    renderDetail(model({
+      id: 'flux-pro',
+      displayName: 'Flux Pro',
+      nameCheck: {
+        checkedAt: '2024-01-01T00:00:00Z',
+        interfaces: ['image-generation'],
+        generationCheck: {
+          interfaces: ['image-generation'],
+          nameServed: true,
+          permissive: true,
+          details: [{
+            interface: 'image-generation',
+            realAccepted: true,
+            fakeAccepted: true,
+            realShape: 'openai-images',
+            fakeShape: 'openai-images',
+            shapeConsistent: true,
+            contentMatch: true,
+          }],
+        },
+      },
+    }));
+
+    expect(screen.getByText('响应内容一致：真实名与虚假名返回完全相同的输出，强烈指向同一上游')).toBeInTheDocument();
+  });
 });
