@@ -108,8 +108,43 @@ describe('discovery workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开配置' }));
     expect(screen.getByPlaceholderText('https://api.example.com/v1 或完整请求 URL')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '关闭连接配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '收起配置' }));
     expect(screen.queryByPlaceholderText('https://api.example.com/v1 或完整请求 URL')).not.toBeInTheDocument();
+  });
+
+  it('exposes a single configuration control per drawer state on compact screens', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, writable: true, value: 390 });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(proxyHealthResponse());
+
+    render(<App />);
+    // 抽屉关闭：只有标题栏的“展开配置”，面板内无关闭按钮
+    expect(screen.getByRole('button', { name: '展开配置' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '关闭配置' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '展开配置' }));
+    // 抽屉展开：标题栏的“收起配置”是唯一控制按钮，面板内没有关闭按钮
+    expect(screen.getByRole('button', { name: '收起配置' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '关闭配置' })).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    // Esc 关闭抽屉后恢复“展开配置”，且焦点回到该按钮
+    expect(screen.queryByRole('button', { name: '收起配置' })).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: '展开配置' }));
+  });
+
+  it('keeps the heading toggle as the sole control on wide screens', () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(proxyHealthResponse());
+
+    render(<App />);
+    const toggle = screen.getByRole('button', { name: '收起配置' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(toggle);
+    expect(screen.getByRole('button', { name: '展开配置' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByPlaceholderText('https://api.example.com/v1 或完整请求 URL')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '展开配置' }));
+    expect(screen.getByPlaceholderText('https://api.example.com/v1 或完整请求 URL')).toBeInTheDocument();
   });
 
   it('restores an endpoint and API key from backend process history without saving it locally', async () => {

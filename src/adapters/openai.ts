@@ -1,7 +1,9 @@
 import type { AdapterRequest, CapabilityKey, ProtocolAdapter } from '../domain/types';
-import { DEFAULT_STOP_SEQUENCE, normalizeModel, records } from './shared';
+import { DEFAULT_STOP_SEQUENCE, normalizeModel, records, STOP_PROBE_WORD, STOP_PROBE_POST, TOOLS_PROBE_NAME } from './shared';
 
-const CREATIVE_PROMPT = '写一段简短的创意文字，包含一个隐喻';
+// 短小、必然产出、对温度敏感：temperature=0 倾向固定字，temperature=1 输出更发散，便于比较。
+const DUAL_PROBE_PROMPT = '请随机回复 3 个不同汉字，用空格分隔';
+const DUAL_PROBE_MAX_TOKENS = 256;
 
 function chatBodies(modelId: string, capability: CapabilityKey): Record<string, unknown> | Record<string, unknown>[] | null {
   const base: Record<string, unknown> = {
@@ -13,41 +15,47 @@ function chatBodies(modelId: string, capability: CapabilityKey): Record<string, 
   // 双探测：不同参数值发两次请求，比较输出差异
   if (capability === 'supportsTemperature') {
     return [
-      { ...base, temperature: 0, messages: [{ role: 'user', content: CREATIVE_PROMPT }] },
-      { ...base, temperature: 1, messages: [{ role: 'user', content: CREATIVE_PROMPT }] },
+      { ...base, max_tokens: DUAL_PROBE_MAX_TOKENS, temperature: 0, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }] },
+      { ...base, max_tokens: DUAL_PROBE_MAX_TOKENS, temperature: 1, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }] },
     ];
   }
   if (capability === 'supportsTopP') {
     return [
-      { ...base, top_p: 1, messages: [{ role: 'user', content: CREATIVE_PROMPT }] },
-      { ...base, top_p: 0.01, messages: [{ role: 'user', content: CREATIVE_PROMPT }] },
+      { ...base, max_tokens: DUAL_PROBE_MAX_TOKENS, top_p: 1, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }] },
+      { ...base, max_tokens: DUAL_PROBE_MAX_TOKENS, top_p: 0.01, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }] },
     ];
   }
   if (capability === 'supportsSeed') {
     return [
-      { ...base, seed: 1, max_tokens: 16 },
-      { ...base, seed: 1, max_tokens: 16 },
+      { ...base, max_tokens: DUAL_PROBE_MAX_TOKENS, seed: 1 },
+      { ...base, max_tokens: DUAL_PROBE_MAX_TOKENS, seed: 1 },
+    ];
+  }
+
+  // 结构化输出：先发严格 schema；若服务端缺 xgrammar 等依赖返回 400，用 json_object 作回退探测
+  if (capability === 'supportsStructuredOutput') {
+    return [
+      { ...base, max_tokens: 32, response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'probe', strict: true,
+          schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false },
+        },
+      } },
+      { ...base, max_tokens: 32, messages: [{ role: 'user', content: '返回 {"ok":true}' }], response_format: { type: 'json_object' } },
     ];
   }
 
   const extras: Partial<Record<CapabilityKey, Record<string, unknown>>> = {
     supportsTools: {
-      tools: [{ type: 'function', function: { name: 'probe_noop', description: 'Do not call', parameters: { type: 'object', properties: {} } } }],
-      tool_choice: { type: 'function', function: { name: 'probe_noop' } },
+      tools: [{ type: 'function', function: { name: TOOLS_PROBE_NAME, description: 'Return the current time', parameters: { type: 'object', properties: { time_zone: { type: 'string' } }, required: ['time_zone'] } } }],
+      tool_choice: { type: 'function', function: { name: TOOLS_PROBE_NAME } },
     },
     supportsJsonMode: { response_format: { type: 'json_object' }, messages: [{ role: 'user', content: '仅返回 {"ok":true}' }] },
-    supportsStructuredOutput: {
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'probe',
-          strict: true,
-          schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false },
-        },
-      },
-    },
     supportsReasoning: { reasoning_effort: 'low' },
-    supportsStop: { stop: [DEFAULT_STOP_SEQUENCE] },
+    // 停止词探测：提示词会自然输出停止词，再判断输出是否在其后继续——
+    // 出现停止词但未出现后置标记 → 生效；出现后置标记 → 未生效；连停止词都未到 → 无法确认
+    supportsStop: { messages: [{ role: 'user', content: '依次输出：一，二，三，四，五，六，七，八，九，十' }], max_tokens: 120, stop: [STOP_PROBE_WORD] },
     supportsStreaming: { stream: true },
   };
   if (capability === 'supportsPromptCache') return null;
@@ -93,24 +101,49 @@ export const openAIResponsesAdapter: ProtocolAdapter = {
 
     if (capability === 'supportsTemperature') {
       return [
-        { method: 'POST', path: '/responses', body: { model: modelId, input: CREATIVE_PROMPT, max_output_tokens: 32, temperature: 0 } },
-        { method: 'POST', path: '/responses', body: { model: modelId, input: CREATIVE_PROMPT, max_output_tokens: 32, temperature: 1 } },
+        { method: 'POST', path: '/responses', body: { model: modelId, input: DUAL_PROBE_PROMPT, max_output_tokens: DUAL_PROBE_MAX_TOKENS, temperature: 0 } },
+        { method: 'POST', path: '/responses', body: { model: modelId, input: DUAL_PROBE_PROMPT, max_output_tokens: DUAL_PROBE_MAX_TOKENS, temperature: 1 } },
       ];
     }
     if (capability === 'supportsTopP') {
       return [
-        { method: 'POST', path: '/responses', body: { model: modelId, input: CREATIVE_PROMPT, max_output_tokens: 32, top_p: 1 } },
-        { method: 'POST', path: '/responses', body: { model: modelId, input: CREATIVE_PROMPT, max_output_tokens: 32, top_p: 0.01 } },
+        { method: 'POST', path: '/responses', body: { model: modelId, input: DUAL_PROBE_PROMPT, max_output_tokens: DUAL_PROBE_MAX_TOKENS, top_p: 1 } },
+        { method: 'POST', path: '/responses', body: { model: modelId, input: DUAL_PROBE_PROMPT, max_output_tokens: DUAL_PROBE_MAX_TOKENS, top_p: 0.01 } },
       ];
     }
 
-    const body: Record<string, unknown> = { model: modelId, input: '回复 OK', max_output_tokens: 8 };
-    if (capability === 'supportsTools') Object.assign(body, { tools: [{ type: 'function', name: 'probe_noop', description: 'Do not call', parameters: { type: 'object', properties: {} } }], tool_choice: 'required', input: '调用 probe_noop' });
-    if (capability === 'supportsJsonMode') Object.assign(body, { text: { format: { type: 'json_object' } }, input: '仅返回 {"ok":true}' });
-    if (capability === 'supportsStructuredOutput') Object.assign(body, { text: { format: { type: 'json_schema', name: 'probe', strict: true, schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false } } }, input: '返回 ok=true' });
-    if (capability === 'supportsReasoning') body.reasoning = { effort: 'low' };
-    if (capability === 'supportsStreaming') body.stream = true;
-    return { method: 'POST', path: '/responses', body };
+    const baseBody: Record<string, unknown> = { model: modelId, input: '回复 OK', max_output_tokens: 8 };
+    const toolParams: Record<string, unknown> = { type: 'object', properties: { time_zone: { type: 'string' } }, required: ['time_zone'] };
+    const schemaBody: Record<string, unknown> = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false };
+    if (capability === 'supportsTools') {
+      const body = { ...baseBody, input: '调用 ' + TOOLS_PROBE_NAME + ' 获取当前时间',
+        tools: [{ type: 'function', name: TOOLS_PROBE_NAME, description: 'Return the current time', parameters: toolParams }],
+        tool_choice: 'required' };
+      return { method: 'POST', path: '/responses', body };
+    }
+    if (capability === 'supportsJsonMode') {
+      const body = { ...baseBody, input: '仅返回 {"ok":true}', text: { format: { type: 'json_object' } } };
+      return { method: 'POST', path: '/responses', body };
+    }
+    if (capability === 'supportsStructuredOutput') {
+      const strictBody = { ...baseBody, max_output_tokens: 32, input: '返回 ok=true',
+        text: { format: { type: 'json_schema', name: 'probe', strict: true, schema: schemaBody } } };
+      const fallbackBody = { ...baseBody, max_output_tokens: 32, input: '返回 {"ok":true}',
+        text: { format: { type: 'json_object' } } };
+      return [
+        { method: 'POST', path: '/responses', body: strictBody },
+        { method: 'POST', path: '/responses', body: fallbackBody },
+      ];
+    }
+    if (capability === 'supportsReasoning') {
+      const body = { ...baseBody, reasoning: { effort: 'low' } };
+      return { method: 'POST', path: '/responses', body };
+    }
+    if (capability === 'supportsStreaming') {
+      const body = { ...baseBody, stream: true };
+      return { method: 'POST', path: '/responses', body };
+    }
+    return { method: 'POST', path: '/responses', body: baseBody };
   },
 };
 

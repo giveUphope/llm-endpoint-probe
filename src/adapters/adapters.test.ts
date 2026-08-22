@@ -82,6 +82,26 @@ describe('protocol adapters', () => {
     expect(extractEchoedModel('data: {"model":"ollama-fake"}')).toBeUndefined();
   });
 
+  it('reads OpenRouter/SenseNova feature and sampling-parameter arrays', () => {
+    const [model] = openAIAdapter.parseModels({ data: [{
+      id: 'sensenova-6.7-flash-lite',
+      supported_features: ['tools', 'json_mode', 'reasoning'],
+      supported_sampling_parameters: ['temperature', 'stop'],
+      pricing: { input_cache_read: '0' },
+      input_modalities: ['text', 'image'],
+    }] });
+    expect(model.id).toBe('sensenova-6.7-flash-lite');
+    expect(model.capabilities.supportsTools.value).toBe('supported');
+    expect(model.capabilities.supportsJsonMode.value).toBe('supported');
+    expect(model.capabilities.supportsReasoning.value).toBe('supported');
+    expect(model.capabilities.supportsTemperature.value).toBe('supported');
+    expect(model.capabilities.supportsStop.value).toBe('supported');
+    expect(model.capabilities.supportsTopP.value).toBe('unknown');
+    expect(model.capabilities.supportsStreaming.value).toBe('unknown');
+    expect(model.capabilities.supportsPromptCache.value).toBe('inferred');
+    expect(model.inputModalities).toEqual(['text', 'image']);
+  });
+
   it('parses relay catalog endpoint types and vendor metadata', () => {
     const [model] = openAIAdapter.parseModels({ data: [{
       id: 'claude-sonnet-4-5', vendor_name: 'Claude', supported_endpoint_types: ['anthropic', 'openai'],

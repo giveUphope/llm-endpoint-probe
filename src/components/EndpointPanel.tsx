@@ -1,4 +1,4 @@
-import { Eye, EyeOff, History, PanelLeftClose, RefreshCw, RotateCcw, ShieldAlert, Trash2, X } from 'lucide-react';
+import { Eye, EyeOff, History, RefreshCw, RotateCcw, ShieldAlert, Trash2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { EndpointProfile } from '../domain/types';
 import type { EndpointHistoryItem } from '../services/proxy';
@@ -29,7 +29,6 @@ export function EndpointPanel(props: Props) {
     <aside className="endpoint-panel">
       <div className="panel-heading">
         <div><span className="eyebrow">端点探测</span><strong>连接参数</strong></div>
-        <button className="icon-button compact-only" title="关闭连接配置" onClick={props.onClose}><PanelLeftClose size={17} /></button>
       </div>
 
       <div className="history-field">

@@ -142,9 +142,31 @@ export function normalizeModel(raw: Record<string, unknown>, protocol: ProtocolT
     }
   }
 
-  const supportedParameters = new Set(
-    Array.isArray(raw.supported_parameters) ? raw.supported_parameters.map((item) => String(item).toLowerCase()) : [],
+  // 端点目录声明的功能特性数组（如 OpenRouter / SenseNova 的 supported_features）
+  const supportedFeatures = new Set(
+    Array.isArray(raw.supported_features) ? raw.supported_features.map((item) => String(item).toLowerCase()) : [],
   );
+  const featureCapabilities: Partial<Record<keyof typeof capabilities, string[]>> = {
+    supportsTools: ['tools', 'tool_calling', 'tool_use'],
+    supportsJsonMode: ['json_mode', 'json_schema'],
+    supportsStructuredOutput: ['structured_output', 'structured_outputs'],
+    supportsReasoning: ['reasoning', 'thinking'],
+    supportsStreaming: ['streaming'],
+  };
+  for (const [key, featureNames] of Object.entries(featureCapabilities)) {
+    const matched = featureNames.filter((name) => supportedFeatures.has(name));
+    if (matched.length && capabilities[key as keyof typeof capabilities].value === 'unknown') {
+      capabilities[key as keyof typeof capabilities] = {
+        value: 'supported',
+        evidence: [evidence('endpoint', 'medium', `${source} 目录声明支持特性 ${matched[0]}`)],
+      };
+    }
+  }
+
+  const supportedParameters = new Set([
+    ...(Array.isArray(raw.supported_parameters) ? raw.supported_parameters : []),
+    ...(Array.isArray(raw.supported_sampling_parameters) ? raw.supported_sampling_parameters : []),
+  ].map((item) => String(item).toLowerCase()));
   const parameterCapabilities: Partial<Record<keyof typeof capabilities, string[]>> = {
     supportsTools: ['tools', 'tool_choice'],
     supportsJsonMode: ['response_format'],
@@ -233,8 +255,16 @@ export function records(value: unknown): Record<string, unknown>[] {
 // 用于探测端点是否对未知模型名静默放行的虚假模型名
 export const PROBE_FAKE_MODEL_ID = 'zcode-probe-nonexistent-model';
 
-// 停止词探测默认值；若出现在响应输出中则证明 stop 参数未被尊重
+// 旧版停止词探测默认值（已弃用：会被自然包含于探测提示词中的词替换）
 export const DEFAULT_STOP_SEQUENCE = 'ZCODE_STOP_SEQUENCE_HERE';
+
+// 停止词探测：提示词会自然输出该词，再判断输出是否在它之后继续——
+// 出现停止词但未见后置标记 → stop 生效；出现后置标记 → stop 未生效；连停止词都未出现 → 无法确认
+export const STOP_PROBE_WORD = '五';
+export const STOP_PROBE_POST = '六';
+
+// 工具探测使用中性、易被真实调用的工具名（避免 'Do not call' 之类触发模型主动拒绝）
+export const TOOLS_PROBE_NAME = 'get_current_time';
 
 // 提取端点响应中实际回显的模型名；依次检查 data.model / modelVersion / choices[0].message.model，
 // 覆盖 OpenAI / Cohere / Ollama / Gemini / OpenRouter 中继等主流响应形状；SSE 流字符串不提取

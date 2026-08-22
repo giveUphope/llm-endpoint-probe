@@ -1,21 +1,23 @@
 import type { AdapterRequest, CapabilityKey, ProtocolAdapter } from '../domain/types';
-import { DEFAULT_STOP_SEQUENCE, normalizeModel, records } from './shared';
+import { DEFAULT_STOP_SEQUENCE, normalizeModel, records, STOP_PROBE_WORD, TOOLS_PROBE_NAME } from './shared';
 
-const CREATIVE_PROMPT = '写一段简短的创意文字，包含一个隐喻';
+// 短小、必然产出、对温度敏感：temperature=0 倾向固定字，temperature=1 输出更发散，便于比较。
+const DUAL_PROBE_PROMPT = '请随机回复 3 个不同汉字，用空格分隔';
+const DUAL_PROBE_MAX_TOKENS = 256;
 
 function chatBodies(modelId: string, capability: CapabilityKey): Record<string, unknown> | Record<string, unknown>[] | null {
   if (capability === 'supportsReasoning' || capability === 'supportsPromptCache') return null;
 
   if (capability === 'supportsTemperature') {
     return [
-      { model: modelId, messages: [{ role: 'user', content: '回复 OK' }], max_tokens: 8, temperature: 0 },
-      { model: modelId, messages: [{ role: 'user', content: CREATIVE_PROMPT }], max_tokens: 32, temperature: 1 },
+      { model: modelId, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }], max_tokens: DUAL_PROBE_MAX_TOKENS, temperature: 0 },
+      { model: modelId, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }], max_tokens: DUAL_PROBE_MAX_TOKENS, temperature: 1 },
     ];
   }
   if (capability === 'supportsTopP') {
     return [
-      { model: modelId, messages: [{ role: 'user', content: '回复 OK' }], max_tokens: 8, p: 1 },
-      { model: modelId, messages: [{ role: 'user', content: CREATIVE_PROMPT }], max_tokens: 32, p: 0.01 },
+      { model: modelId, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }], max_tokens: DUAL_PROBE_MAX_TOKENS, p: 1 },
+      { model: modelId, messages: [{ role: 'user', content: DUAL_PROBE_PROMPT }], max_tokens: DUAL_PROBE_MAX_TOKENS, p: 0.01 },
     ];
   }
   if (capability === 'supportsSeed') {
@@ -27,8 +29,8 @@ function chatBodies(modelId: string, capability: CapabilityKey): Record<string, 
 
   const body: Record<string, unknown> = { model: modelId, messages: [{ role: 'user', content: '回复 OK' }], max_tokens: 8 };
   if (capability === 'supportsTools') {
-    body.messages = [{ role: 'user', content: '调用 probe_noop' }];
-    body.tools = [{ type: 'function', function: { name: 'probe_noop', description: 'Do not call', parameters: { type: 'object', properties: {} } } }];
+    body.messages = [{ role: 'user', content: '调用 ' + TOOLS_PROBE_NAME + ' 获取当前时间' }];
+    body.tools = [{ type: 'function', function: { name: TOOLS_PROBE_NAME, description: 'Return the current time', parameters: { type: 'object', properties: { time_zone: { type: 'string' } }, required: ['time_zone'] } } }];
     body.tool_choice = 'REQUIRED';
   }
   if (capability === 'supportsJsonMode') {
@@ -38,7 +40,7 @@ function chatBodies(modelId: string, capability: CapabilityKey): Record<string, 
   if (capability === 'supportsStructuredOutput') {
     body.response_format = { type: 'json_object', schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'] } };
   }
-  if (capability === 'supportsStop') body.stop_sequences = [DEFAULT_STOP_SEQUENCE];
+  if (capability === 'supportsStop') { body.messages = [{ role: 'user', content: '依次输出：一，二，三，四，五，六，七，八，九，十' }]; body.max_tokens = 120; body.stop_sequences = [STOP_PROBE_WORD]; }
   if (capability === 'supportsStreaming') body.stream = true;
   return body;
 }

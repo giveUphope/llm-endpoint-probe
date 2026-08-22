@@ -61,6 +61,7 @@ code, pre { font-family: "Cascadia Code", Consolas, monospace; }
 .workspace-backdrop { display: none; }
 
 .endpoint-panel { min-height: 0; overflow-y: auto; background: var(--surface); border-right: 1px solid var(--line); padding: 16px; }
+.endpoint-panel:focus { outline: none; }
 .panel-heading, .detail-heading, .workspace-heading, .modal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .panel-heading { margin-bottom: 13px; }
 .panel-heading strong { display: block; margin-top: 2px; font-size: var(--fs-xl); }
@@ -284,7 +285,9 @@ code, pre { font-family: "Cascadia Code", Consolas, monospace; }
   .response-limit { display: none !important; }
   .workspace, .workspace.detail-open, .workspace.sidebar-collapsed, .workspace.sidebar-collapsed.detail-open { display: grid; grid-template-columns: minmax(0, 1fr); }
   .workspace-backdrop { position: fixed; inset: 54px 0 0 min(380px, calc(100vw - 48px)); z-index: 14; display: block; padding: 0; border: 0; background: rgba(17, 25, 30, .42); cursor: default; }
+  .workspace:not(.sidebar-collapsed) .workspace-backdrop { inset: 118px 0 0 min(380px, calc(100vw - 48px)); }
   .endpoint-panel { position: fixed; inset: 54px auto 0 0; z-index: 15; width: min(380px, calc(100vw - 48px)); max-height: none; border-right: 1px solid var(--line); border-bottom: 0; box-shadow: 12px 0 28px rgba(0, 0, 0, .18); overscroll-behavior: contain; }
+  .workspace:not(.sidebar-collapsed) .endpoint-panel { inset: 118px auto 0 0; }
   .compact-only { display: inline-grid; }
   .main-workspace { min-height: 0; }
   .model-detail { position: fixed; inset: 54px 0 0 auto; z-index: 10; width: min(480px, 100vw); box-shadow: -12px 0 28px rgba(0,0,0,.18); }

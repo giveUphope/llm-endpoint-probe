@@ -29,6 +29,8 @@ export default function App() {
   const [run, setRun] = useState<DiscoveryRun>();
   const [selectedId, setSelectedId] = useState<string>();
   const [activeView, setActiveView] = useState<'models' | 'logs'>('models');
+  const compactLayout = useRef(typeof window !== 'undefined' && window.innerWidth <= 900);
+  const [compact, setCompact] = useState<boolean>(compactLayout.current);
   const [sidebarOpen, setSidebarOpen] = useState(() => typeof window === 'undefined' || window.innerWidth > 900);
   const [search, setSearch] = useState('');
   const [capabilityFilter, setCapabilityFilter] = useState('');
@@ -44,7 +46,8 @@ export default function App() {
   const [proxyHealth, setProxyHealth] = useState<ProxyHealthState>({ status: 'checking', message: '正在验证本地受控代理' });
   const controllerRef = useRef<AbortController | undefined>(undefined);
   const healthCheckSequence = useRef(0);
-  const compactLayout = useRef(typeof window !== 'undefined' && window.innerWidth <= 900);
+  const toggleRef = useRef<HTMLButtonElement | null>(null);
+  const previousSidebarOpen = useRef(sidebarOpen);
 
   const refreshProxyHealth = useCallback(async (showChecking = true): Promise<boolean> => {
     const sequence = ++healthCheckSequence.current;
@@ -104,11 +107,27 @@ export default function App() {
       const nextCompact = window.innerWidth <= 900;
       if (nextCompact === compactLayout.current) return;
       compactLayout.current = nextCompact;
+      setCompact(nextCompact);
       setSidebarOpen(!nextCompact);
     };
     window.addEventListener('resize', syncLayout);
     return () => window.removeEventListener('resize', syncLayout);
   }, []);
+
+  useEffect(() => {
+    const opened = sidebarOpen && !previousSidebarOpen.current;
+    const closed = !sidebarOpen && previousSidebarOpen.current;
+    previousSidebarOpen.current = sidebarOpen;
+    if (!compact) return;
+    if (closed) toggleRef.current?.focus();
+  }, [compact, sidebarOpen]);
+
+  useEffect(() => {
+    if (!compact || !sidebarOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setSidebarOpen(false); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [compact, sidebarOpen]);
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2800); };
   const updateProfile = (next: EndpointProfile) => setProfile(next);
@@ -210,7 +229,7 @@ export default function App() {
     <div className={`workspace ${sidebarOpen ? '' : 'sidebar-collapsed'} ${selectedModel ? 'detail-open' : ''}`}>
       {sidebarOpen && <><button className="workspace-backdrop" aria-label="关闭配置遮罩" onClick={() => setSidebarOpen(false)} /><EndpointPanel profile={profile} history={endpointHistory} historyLoading={historyLoading} running={run?.status === 'running' || Boolean(run?.models.some((model) => model.status === 'validating'))} proxyStatus={proxyHealth.status} proxyMessage={proxyHealth.message} onChange={updateProfile} onClose={() => setSidebarOpen(false)} onRestoreHistory={(id) => void restoreHistory(id)} onClearHistory={() => void clearHistory()} onProbe={startProbe} onCancel={() => controllerRef.current?.abort()} /></>}
       <main className="main-workspace">
-        <div className="workspace-heading"><div className="heading-left"><button className="icon-button" title={sidebarOpen ? '收起配置' : '展开配置'} aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}>{sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}</button><div><span className="eyebrow">工作台</span><h2>{profile.name}</h2></div></div><div className="run-state"><span className={`run-dot run-${run?.status || 'idle'}`} />{run ? ({ running: '探测进行中', success: '探测完成', partial: '部分完成', error: '探测失败', cancelled: '已取消', idle: '未开始' }[run.status]) : '等待探测'}</div></div>
+        <div className="workspace-heading"><div className="heading-left"><button ref={toggleRef} className="icon-button" title={sidebarOpen ? '收起配置' : '展开配置'} aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}>{sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}</button><div><span className="eyebrow">工作台</span><h2>{profile.name}</h2></div></div><div className="run-state"><span className={`run-dot run-${run?.status || 'idle'}`} />{run ? ({ running: '探测进行中', success: '探测完成', partial: '部分完成', error: '探测失败', cancelled: '已取消', idle: '未开始' }[run.status]) : '等待探测'}</div></div>
         <div className="view-tabs"><button className={activeView === 'models' ? 'active' : ''} onClick={() => setActiveView('models')}><Braces size={15} />模型结果 <span>{run?.models.length ?? 0}</span></button><button className={activeView === 'logs' ? 'active' : ''} onClick={() => setActiveView('logs')}><ScrollText size={15} />探测与请求 <span>{run?.requests.length ?? 0}</span></button></div>
         {activeView === 'models' ? <ModelsTable models={filteredModels} selectedId={selectedId} search={search} capabilityFilter={capabilityFilter} confidenceFilter={confidenceFilter} protocolFilter={protocolFilter} statusFilter={statusFilter} sortKey={sortKey} sortDirection={sortDirection} onSearch={setSearch} onCapabilityFilter={setCapabilityFilter} onConfidenceFilter={setConfidenceFilter} onProtocolFilter={setProtocolFilter} onStatusFilter={setStatusFilter} onSort={handleSort} onSelect={(model) => setSelectedId(model.id)} /> : <ProbeLog run={run} />}
       </main>

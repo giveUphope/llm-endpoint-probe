@@ -74,6 +74,54 @@ it('recognizes event streams and keeps behavior-only parameters unknown', () => 
     expect(evaluateValidation('supportsTemperature', response({ choices: [] }))).toMatchObject({ value: 'unknown', confidence: 'medium' });
   });
 
+  it('evaluates a single-response array by its response content rather than as a missing dual probe', () => {
+    expect(evaluateValidation('supportsTools', [
+      response({ choices: [{ message: { tool_calls: [{ id: '1' }] } }] }),
+    ])).toMatchObject({ value: 'supported', confidence: 'high' });
+    expect(evaluateValidation('supportsJsonMode', [
+      response({ choices: [{ message: { content: '{"ok":true}' } }] }),
+    ])).toMatchObject({ value: 'supported', confidence: 'high' });
+    expect(evaluateValidation('supportsReasoning', [
+      response({ choices: [{ message: { content: 'OK', reasoning_content: 'thinking' } }] }),
+    ])).toMatchObject({ value: 'supported', confidence: 'high' });
+    expect(evaluateValidation('supportsStreaming', [
+      response('data: {"ok":true}', 'text/event-stream'),
+    ])).toMatchObject({ value: 'supported', confidence: 'high' });
+  });
+
+  it('reports specifically why a dual probe cannot compare outputs', () => {
+    const empty = response({ choices: [] });
+    const bothEmpty = evaluateValidation('supportsTemperature', [empty, empty]);
+    expect(bothEmpty).toMatchObject({ value: 'unknown', confidence: 'medium' });
+    expect(bothEmpty.detail).toContain('两次探测响应输出均为空');
+    expect(evaluateValidation('supportsTemperature', [
+      response({ choices: [{ message: { content: 'creative' } }] }),
+      empty,
+    ]).detail).toContain('其中一次探测响应输出为空');
+  });
+
+  it('extracts response text from diverse response shapes for dual-probe comparison', () => {
+    expect(evaluateValidation('supportsTemperature', [
+      response({ choices: [{ text: 'abc' }] }),
+      response({ choices: [{ text: 'xyz' }] }),
+    ])).toMatchObject({ value: 'supported', confidence: 'medium' });
+    expect(evaluateValidation('supportsTemperature', [
+      response({ text: 'first' }),
+      response({ generated_text: 'second' }),
+    ])).toMatchObject({ value: 'supported', confidence: 'medium' });
+    expect(evaluateValidation('supportsTemperature', [
+      response({ output: [{ content: [{ text: 'left' }] }] }),
+      response({ output: [{ content: [{ text: 'right' }] }] }),
+    ])).toMatchObject({ value: 'supported', confidence: 'medium' });
+  });
+
+  it('distinguishes empty output from identical non-empty output', () => {
+    expect(evaluateValidation('supportsTemperature', [
+      response({ choices: [{ message: { content: 'same' } }] }),
+      response({ choices: [{ message: { content: 'same' } }] }),
+    ]).detail).toContain('相同输出');
+  });
+
   it('detects reasoning content in the response before marking reasoning supported', () => {
     expect(evaluateValidation('supportsReasoning', response({ choices: [{ message: { content: 'OK', reasoning_content: 'thinking step...' } }] })).value).toBe('supported');
     expect(evaluateValidation('supportsReasoning', response({ candidates: [{ content: [{ type: 'thinking', text: 'thinking' }, { text: 'OK' }] }] })).value).toBe('supported');

@@ -1,23 +1,25 @@
 import { evidence, modelConfidence } from '../domain/capabilities';
 import type { AdapterRequest, CapabilityKey, ProtocolAdapter } from '../domain/types';
-import { DEFAULT_STOP_SEQUENCE, normalizeModel, records } from './shared';
+import { DEFAULT_STOP_SEQUENCE, normalizeModel, records, STOP_PROBE_WORD, TOOLS_PROBE_NAME } from './shared';
 
-const CREATIVE_PROMPT = '写一段简短的创意文字，包含一个隐喻';
+// 短小、必然产出、对温度敏感：temperature=0 倾向固定字，temperature=1 输出更发散，便于比较。
+const DUAL_PROBE_PROMPT = '请随机回复 3 个不同汉字，用空格分隔';
+const DUAL_PROBE_MAX_TOKENS = 256;
 
 function generationBodies(capability: CapabilityKey): Record<string, unknown> | Record<string, unknown>[] | null {
-  const creativeContent = { contents: [{ role: 'user', parts: [{ text: CREATIVE_PROMPT }] }] };
+  const dualProbeContent = { contents: [{ role: 'user', parts: [{ text: DUAL_PROBE_PROMPT }] }] };
   const defaultContent = { contents: [{ role: 'user', parts: [{ text: '回复 OK' }] }] };
 
   if (capability === 'supportsTemperature') {
     return [
-      { ...creativeContent, generationConfig: { maxOutputTokens: 8, temperature: 0 } },
-      { ...creativeContent, generationConfig: { maxOutputTokens: 8, temperature: 1 } },
+      { ...dualProbeContent, generationConfig: { maxOutputTokens: DUAL_PROBE_MAX_TOKENS, temperature: 0 } },
+      { ...dualProbeContent, generationConfig: { maxOutputTokens: DUAL_PROBE_MAX_TOKENS, temperature: 1 } },
     ];
   }
   if (capability === 'supportsTopP') {
     return [
-      { ...creativeContent, generationConfig: { maxOutputTokens: 8, topP: 1 } },
-      { ...creativeContent, generationConfig: { maxOutputTokens: 8, topP: 0.01 } },
+      { ...dualProbeContent, generationConfig: { maxOutputTokens: DUAL_PROBE_MAX_TOKENS, topP: 1 } },
+      { ...dualProbeContent, generationConfig: { maxOutputTokens: DUAL_PROBE_MAX_TOKENS, topP: 0.01 } },
     ];
   }
   if (capability === 'supportsSeed') {
@@ -34,16 +36,16 @@ function generationBodies(capability: CapabilityKey): Record<string, unknown> | 
     generationConfig,
   };
   if (capability === 'supportsTools') {
-    body.contents = [{ role: 'user', parts: [{ text: '调用 probe_noop' }] }];
-    body.tools = [{ functionDeclarations: [{ name: 'probe_noop', description: 'Do not call', parameters: { type: 'OBJECT', properties: {} } }] }];
-    body.toolConfig = { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: ['probe_noop'] } };
+    body.contents = [{ role: 'user', parts: [{ text: '调用 ' + TOOLS_PROBE_NAME + ' 获取当前时间' }] }];
+    body.tools = [{ functionDeclarations: [{ name: TOOLS_PROBE_NAME, description: 'Return the current time', parameters: { type: 'OBJECT', properties: { time_zone: { type: 'STRING' } }, required: ['time_zone'] } }] }];
+    body.toolConfig = { functionCallingConfig: { mode: 'ANY', allowedFunctionNames: [TOOLS_PROBE_NAME] } };
   }
   if (capability === 'supportsJsonMode') {
     body.contents = [{ role: 'user', parts: [{ text: '仅返回 {"ok":true}' }] }];
     generationConfig.responseMimeType = 'application/json';
   }
   if (capability === 'supportsReasoning') generationConfig.thinkingConfig = { thinkingBudget: 128 };
-  if (capability === 'supportsStop') generationConfig.stopSequences = [DEFAULT_STOP_SEQUENCE];
+  if (capability === 'supportsStop') { body.contents = [{ role: 'user', parts: [{ text: '依次输出：一，二，三，四，五，六，七，八，九，十' }] }]; generationConfig.maxOutputTokens = 120; generationConfig.stopSequences = [STOP_PROBE_WORD]; }
   return body;
 }
 
