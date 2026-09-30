@@ -1,7 +1,7 @@
 import { RefreshCw } from 'lucide-react';
 import { capabilityValueLabels } from '../domain/capabilities';
 import type { CapabilityValue, DiscoveredModel } from '../domain/types';
-import { compareReference, matchReference, type ReferenceState } from '../services/reference';
+import { compareReference, matchReference, type ReferenceRow, type ReferenceState } from '../services/reference';
 
 interface Props {
   model: DiscoveredModel;
@@ -9,7 +9,7 @@ interface Props {
   onRetry: () => void;
 }
 
-type Tone = 'good' | 'bad' | 'muted';
+type Tone = 'good' | 'bad' | 'info' | 'muted';
 
 interface Verdict {
   text: string;
@@ -20,24 +20,29 @@ function definitive(value: CapabilityValue): boolean {
   return value === 'supported' || value === 'unsupported';
 }
 
-// 比对结论：两侧都是确定结论才可能“一致/冲突”；参照缺失记为“参照未覆盖”，
-// 端点未验证则记为“待端点验证” —— 参照声明从不单独推翻或确认端点结论
-function verdict(local: CapabilityValue, reference: CapabilityValue): Verdict {
-  if (definitive(local) && definitive(reference)) {
-    return local === reference ? { text: '一致', tone: 'good' } : { text: '冲突', tone: 'bad' };
+// 比对结论：两侧都是确定结论才可能一致/冲突；参照缺失记为“参照未覆盖”，端点未验证记为“待端点验证”。
+// 冲突按端点侧证据强度分级：已实测的结论优先于第三方声明（多为自己部署裁剪或参照目录过时），
+// 两侧都只是声明时才是真正需要实测来分的“声明分歧”
+function rowVerdict(row: ReferenceRow, ambiguous: boolean): Verdict {
+  if (ambiguous) return { text: '匹配歧义', tone: 'muted' };
+  if (row.conflict) {
+    return row.severity === 'validated-over-declaration'
+      ? { text: '实测优先', tone: 'info' }
+      : { text: '声明分歧', tone: 'bad' };
   }
-  if (reference === 'unknown') return { text: '参照未覆盖', tone: 'muted' };
-  return { text: '待端点验证', tone: 'muted' };
-}
-
-function pairVerdict(leftPresent: boolean, rightPresent: boolean, equal: boolean): Verdict {
-  if (leftPresent && rightPresent) return equal ? { text: '一致', tone: 'good' } : { text: '冲突', tone: 'bad' };
-  if (!rightPresent) return { text: '参照未覆盖', tone: 'muted' };
+  if (row.local === 'unsupported' && row.reference === 'supported' && row.partial) {
+    return { text: '参照部分声明', tone: 'muted' };
+  }
+  if (definitive(row.local) && definitive(row.reference)) return { text: '一致', tone: 'good' };
+  if (row.reference === 'unknown') return { text: '参照未覆盖', tone: 'muted' };
   return { text: '待端点验证', tone: 'muted' };
 }
 
 function toneClass(tone: Tone): string {
-  return tone === 'good' ? 'ref-match' : tone === 'bad' ? 'ref-conflict' : 'ref-muted';
+  if (tone === 'good') return 'ref-match';
+  if (tone === 'bad') return 'ref-conflict';
+  if (tone === 'info') return 'ref-info';
+  return 'ref-muted';
 }
 
 function referenceLabel(value: CapabilityValue): string {
@@ -58,47 +63,84 @@ export function ReferenceCompare({ model, reference, onRetry }: Props) {
     );
   }
   const { catalog } = reference;
-  const entry = matchReference(model, catalog);
-  if (!entry) {
+  const match = matchReference(model, catalog);
+  if (!match) {
     return <p className="ref-note">OpenRouter 公开目录中未匹配到「{model.id}」：无法交叉比对。参照缺失不代表该端点或模型不支持任何能力。</p>;
   }
-  const comparison = compareReference(model, entry);
+  const comparison = compareReference(model, match);
+  const { entry, variants, ambiguous, providerCount } = comparison;
+  const tierList = variants.map((variant) => variant.tier ?? '主档');
+  const snapshot = new Date(catalog.fetchedAt).toLocaleString('zh-CN', { hour12: false });
   const conflicts = [
-    comparison.conflictCount ? `${comparison.conflictCount} 项能力声明冲突` : '',
-    comparison.contextConflict ? '上下文窗口不一致' : '',
-    comparison.modalityConflict ? '输入模态不一致' : '',
+    ambiguous ? `该名称在参照目录中匹配到 ${comparison.otherGroups.length + 1} 个不同条目（另含 ${comparison.otherGroups.join('、')}）` : '',
+    comparison.conflictCount
+      ? `${comparison.conflictCount} 项冲突（实测优先 ${comparison.validatedConflicts} 项、声明分歧 ${comparison.declaredConflicts} 项）`
+      : '',
+    comparison.contextConflict ? '上下文窗口不属于参照任一声明值' : '',
+    comparison.modalityConflict ? '端点声明了参照未覆盖的输入模态' : '',
   ].filter(Boolean);
   const covered = comparison.rows.filter((row) => row.reference !== 'unknown').length;
-  const snapshot = new Date(catalog.fetchedAt).toLocaleString('zh-CN', { hour12: false });
-  const context = pairVerdict(
-    comparison.localContextWindow != null,
-    comparison.referenceContextWindow != null,
-    comparison.localContextWindow === comparison.referenceContextWindow,
-  );
-  const modalities = pairVerdict(
-    comparison.localModalities.length > 0,
-    comparison.referenceModalities.length > 0,
-    !comparison.modalityConflict,
-  );
+  const mergeNote = [
+    variants.length > 1 ? `已合并 ${variants.length} 个档位声明` : '',
+    providerCount > 1 ? `同名条目来自 ${providerCount} 个 provider（声明取并集）` : '',
+  ].filter(Boolean).join('，');
+  const context = ambiguous
+    ? { text: '匹配歧义', tone: 'muted' } as Verdict
+    : comparison.localContextWindow == null
+      ? { text: '待端点验证', tone: 'muted' } as Verdict
+      : comparison.contextTiers.length === 0
+        ? { text: '参照未覆盖', tone: 'muted' } as Verdict
+        : comparison.contextConflict
+          ? { text: '冲突', tone: 'info' } as Verdict
+          : { text: '一致', tone: 'good' } as Verdict;
+  const modalities = ambiguous
+    ? { text: '匹配歧义', tone: 'muted' } as Verdict
+    : comparison.modalityConflict
+      ? { text: '冲突', tone: 'info' } as Verdict
+      : comparison.localModalities.length === 0
+        ? { text: '待端点验证', tone: 'muted' } as Verdict
+        : comparison.referenceModalities.length === 0
+          ? { text: '参照未覆盖', tone: 'muted' } as Verdict
+          : comparison.referenceOnlyModalities.length > 0
+            ? { text: '参照更广', tone: 'muted' } as Verdict
+            : { text: '一致', tone: 'good' } as Verdict;
+  const reasoning = comparison.reasoning;
+  const reasoningVerdict = ambiguous
+    ? { text: '匹配歧义', tone: 'muted' } as Verdict
+    : !reasoning.covered
+      ? { text: '参照未覆盖', tone: 'muted' } as Verdict
+      : reasoning.local.length === 0
+        ? { text: '待端点验证', tone: 'muted' } as Verdict
+        : reasoning.localOnly.length > 0
+          ? { text: '档位分歧', tone: 'info' } as Verdict
+          : reasoning.referenceOnly.length > 0
+            ? { text: '参照更广', tone: 'muted' } as Verdict
+            : { text: '一致', tone: 'good' } as Verdict;
   return (
     <div className="ref-compare">
+      {catalog.stale && <div className="ref-note warn"><span>参照快照来自过期缓存（{snapshot}）：{catalog.staleReason ?? '上游本次获取失败'}。降级快照只用于展示，不影响端点探测结论。</span></div>}
       <div className="name-check">
         <div className="name-check-row"><span>参照条目</span><code>{entry.id}{entry.name ? ` · ${entry.name}` : ''}</code></div>
         <div className="name-check-row"><span>目录快照</span><code>{snapshot}</code></div>
+        {variants.length > 1 && <div className="name-check-row"><span>档位合并</span><code>{tierList.join(' / ')}</code></div>}
+        {entry.alias && entry.aliasTarget && <div className="name-check-row"><span>别名指向</span><code>{entry.aliasTarget}</code></div>}
       </div>
       <p className="ref-note">以下为 OpenRouter 公开目录的第三方声明，仅用于与当前端点结果交叉比对；出现冲突时，以当前端点的实测（validated）证据为准。</p>
       {conflicts.length
         ? <div className="name-check-note warn">{conflicts.join('；')}：请结合两端证据判断是端点声明过时、参照声明过时，还是实际能力差异，不要单凭参照下结论。</div>
-        : <div className="name-check-note good">端点结论与参照目录声明未发现冲突（参照覆盖 {covered} 项能力）。</div>}
+        : <div className="name-check-note good">端点结论与参照目录声明未发现冲突（参照覆盖 {covered} 项能力{mergeNote ? `，${mergeNote}` : ''}）。</div>}
       <div className="ref-table">
         <div className="ref-row ref-head"><span>能力</span><span>端点结论</span><span>参照声明</span><span>比对</span></div>
         {comparison.rows.map((row) => {
-          const result = verdict(row.local, row.reference);
+          const result = rowVerdict(row, ambiguous);
           return (
             <div className="ref-row" key={row.key}>
               <span className="ref-label">{row.label}</span>
               <span className="ref-value">{capabilityValueLabels[row.local]}</span>
-              <span className="ref-value">{referenceLabel(row.reference)}</span>
+              <span className="ref-value">
+                {referenceLabel(row.reference)}
+                {row.partial && row.reference === 'supported' && <em className="ref-sub">{row.supportingListings}/{variants.length} 个条目声明</em>}
+              </span>
               <span className={toneClass(result.tone)}>{result.text}</span>
             </div>
           );
@@ -106,14 +148,29 @@ export function ReferenceCompare({ model, reference, onRetry }: Props) {
         <div className="ref-row">
           <span className="ref-label">上下文窗口</span>
           <span className="ref-value">{comparison.localContextWindow?.toLocaleString() ?? '未知'}</span>
-          <span className="ref-value">{comparison.referenceContextWindow?.toLocaleString() ?? '参照未覆盖'}</span>
+          <span className="ref-value">
+            {comparison.referenceContextWindow?.toLocaleString() ?? (comparison.contextTiers.length ? comparison.contextTiers[0].toLocaleString() : '参照未覆盖')}
+            {comparison.contextTiers.length > 1 && <em className="ref-sub">声明值 {comparison.contextTiers.map((value) => value.toLocaleString()).join(' / ')}</em>}
+          </span>
           <span className={toneClass(context.tone)}>{context.text}</span>
         </div>
         <div className="ref-row">
           <span className="ref-label">输入模态</span>
           <span className="ref-value">{comparison.localModalities.join(' / ') || '—'}</span>
-          <span className="ref-value">{comparison.referenceModalities.join(' / ') || '—'}</span>
+          <span className="ref-value">
+            {comparison.referenceModalities.join(' / ') || '—'}
+            {comparison.referenceOnlyModalities.length > 0 && <em className="ref-sub">参照另声明 {comparison.referenceOnlyModalities.join(' / ')}</em>}
+          </span>
           <span className={toneClass(modalities.tone)}>{modalities.text}</span>
+        </div>
+        <div className="ref-row">
+          <span className="ref-label">Reasoning 档位</span>
+          <span className="ref-value">{reasoning.local.join(' / ') || '—'}</span>
+          <span className="ref-value">
+            {reasoning.reference.join(' / ') || '—'}
+            {reasoning.referenceOnly.length > 0 && <em className="ref-sub">参照另声明 {reasoning.referenceOnly.join(' / ')}</em>}
+          </span>
+          <span className={toneClass(reasoningVerdict.tone)}>{reasoningVerdict.text}</span>
         </div>
       </div>
     </div>

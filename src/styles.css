@@ -196,6 +196,8 @@ code, pre { font-family: "Cascadia Code", Consolas, monospace; }
 .ref-match { color: #08714c; }
 .ref-conflict { color: var(--danger); font-weight: 600; }
 .ref-muted { color: var(--muted); }
+.ref-info { color: #8c5a12; font-weight: 600; }
+.ref-sub { display: block; margin-top: 3px; color: var(--muted); font-size: var(--fs-2xs); font-style: normal; }
 .capability-matrix { border-top: 1px solid var(--line); }
 .capability-row { display: grid; grid-template-columns: 105px 70px 1fr; align-items: start; gap: 8px; padding: 9px 2px; border-bottom: 1px solid var(--soft-line); font-size: var(--fs-2xs); }
 .capability-row > span:first-child { padding-top: 3px; font-weight: 600; }

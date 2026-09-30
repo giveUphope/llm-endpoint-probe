@@ -222,7 +222,13 @@ export interface ProxyResponse {
 export interface ReferenceModelEntry {
   id: string;
   name?: string;
+  /** 别名条目指向的真实条目 slug；别名自身的能力声明不可靠 */
   alias?: boolean;
+  aliasTarget?: string;
+  /** 同一型号多个档位（:free / :batch …）共享的 canonical slug，用于把档位归组 */
+  canonicalSlug?: string;
+  /** 档位后缀（free / batch …），undefined 表示主档 */
+  tier?: string;
   contextWindow?: number;
   inputModalities: InputModality[];
   /** undefined 表示目录未声明该字段，比对时一律记为“参照未覆盖” */
@@ -234,5 +240,8 @@ export interface ReferenceCatalog {
   source: 'openrouter';
   url: string;
   fetchedAt: string;
+  /** 上游本次不可用，代理回退到过期快照：仅作降级说明，不改变任何比对语义 */
+  stale?: boolean;
+  staleReason?: string;
   models: ReferenceModelEntry[];
 }

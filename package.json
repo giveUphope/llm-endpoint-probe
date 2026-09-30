@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "tsc --noEmit && vite build",
+    "fixture:reference": "tsx scripts/make-reference-catalog-fixture.mts",
     "start": "tsx server/index.ts"
   },
   "dependencies": {

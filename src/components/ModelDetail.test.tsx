@@ -204,12 +204,16 @@ describe('ModelDetail OpenRouter reference comparison', () => {
     expect(screen.getByText('OpenRouter 参照比对')).toBeInTheDocument();
     expect(screen.getByText('openai/gpt-4o · OpenAI: GPT-4o')).toBeInTheDocument();
     expect(screen.getByText('目录快照')).toBeInTheDocument();
-    expect(screen.getByText(/3 项能力声明冲突/)).toBeInTheDocument();
-    expect(screen.getByText(/上下文窗口不一致/)).toBeInTheDocument();
-    expect(screen.getByText(/输入模态不一致/)).toBeInTheDocument();
+    expect(screen.getByText(/3 项冲突（实测优先 2 项、声明分歧 1 项）/)).toBeInTheDocument();
+    expect(screen.getByText(/上下文窗口不属于参照任一声明值/)).toBeInTheDocument();
+    expect(screen.queryByText(/端点声明了参照未覆盖的输入模态/)).not.toBeInTheDocument();
+    expect(screen.getByText('参照另声明 image')).toBeInTheDocument();
     expect(screen.getByText('以下为 OpenRouter 公开目录的第三方声明，仅用于与当前端点结果交叉比对；出现冲突时，以当前端点的实测（validated）证据为准。')).toBeInTheDocument();
-    expect(screen.getAllByText('冲突').length).toBeGreaterThanOrEqual(3);
-    expect(screen.getAllByText('参照未覆盖').length).toBeGreaterThanOrEqual(4);
+    // 端点已实测的能力与参照声明相左 → 实测优先；两侧都只是声明 → 声明分歧
+    expect(screen.getAllByText('实测优先').length).toBe(2);
+    expect(screen.getAllByText('声明分歧').length).toBe(1);
+    expect(screen.getByText('Reasoning 档位')).toBeInTheDocument();
+    expect(screen.getAllByText('参照未覆盖').length).toBeGreaterThanOrEqual(5);
     expect(screen.getAllByText('待端点验证').length).toBeGreaterThan(0);
   });
 
@@ -229,6 +233,82 @@ describe('ModelDetail OpenRouter reference comparison', () => {
 
     expect(screen.getByText(/端点结论与参照目录声明未发现冲突/)).toBeInTheDocument();
     expect(screen.queryByText('冲突')).not.toBeInTheDocument();
+  });
+
+  it('merges tier listings instead of reporting a false conflict from a narrower tier', () => {
+    const m = model({ id: 'gpt-6.1-sol', contextWindow: 1050000, inputModalities: ['text'] });
+    m.capabilities.supportsStructuredOutput = {
+      value: 'supported',
+      evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 schema 合规输出', timestamp: '2026-09-30T00:00:00.000Z' }],
+    };
+    renderDetail(m, true, readyCatalog([
+      { id: 'openai/gpt-6.1-sol:batch', canonicalSlug: 'openai/gpt-6.1-sol', tier: 'batch', contextWindow: 1050000, inputModalities: ['text'], supportedParameters: ['structured_outputs'], reasoningLevels: [] },
+      { id: 'openai/gpt-6.1-sol', canonicalSlug: 'openai/gpt-6.1-sol', contextWindow: 1050000, inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] },
+    ]));
+
+    expect(screen.getByText('档位合并')).toBeInTheDocument();
+    expect(screen.getByText('主档 / batch')).toBeInTheDocument();
+    expect(screen.getByText(/已合并 2 个档位声明/)).toBeInTheDocument();
+    expect(screen.queryByText('冲突')).not.toBeInTheDocument();
+  });
+
+  it('downgrades every reference verdict when only a provider prefix could explain the name', () => {
+    const m = model({ id: 'Meta-Llama-3.1-8B', contextWindow: 128000, inputModalities: ['text'] });
+    m.capabilities.supportsTools = {
+      value: 'supported',
+      evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }],
+    };
+    renderDetail(m, true, readyCatalog([
+      { id: 'meta-llama/llama-3.1-8b', canonicalSlug: 'meta-llama/llama-3.1-8b', contextWindow: 128000, inputModalities: ['text'], supportedParameters: [], reasoningLevels: [] },
+      { id: 'meta-cloud/llama-3.1-8b', canonicalSlug: 'meta-cloud/llama-3.1-8b', contextWindow: 128000, inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] },
+    ]));
+
+    expect(screen.getByText(/该名称在参照目录中匹配到 2 个不同条目/)).toBeInTheDocument();
+    expect(screen.getAllByText('匹配歧义').length).toBe(13);
+    expect(screen.queryByText(/实测优先|声明分歧|一致/)).not.toBeInTheDocument();
+  });
+
+  it('discloses that same-name listings from several providers were merged', () => {
+    const m = model({ id: 'gpt-4o', contextWindow: 128000, inputModalities: ['text'] });
+    m.capabilities.supportsTools = {
+      value: 'supported',
+      evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }],
+    };
+    renderDetail(m, true, readyCatalog([
+      { id: 'openai/gpt-4o', canonicalSlug: 'openai/gpt-4o', contextWindow: 128000, inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] },
+      { id: 'relay-mirror/gpt-4o', canonicalSlug: 'relay-mirror/gpt-4o', contextWindow: 128000, inputModalities: ['text'], supportedParameters: [], reasoningLevels: [] },
+    ]));
+
+    expect(screen.getByText(/同名条目来自 2 个 provider（声明取并集）/)).toBeInTheDocument();
+    expect(screen.queryByText('匹配歧义')).not.toBeInTheDocument();
+  });
+
+  it('compares reasoning effort levels as its own row', () => {
+    const m = model({ id: 'thinker', contextWindow: 128000, inputModalities: ['text'], reasoningLevels: ['low', 'high'] });
+    renderDetail(m, true, readyCatalog([{
+      id: 'x/thinker', canonicalSlug: 'x/thinker', contextWindow: 128000, inputModalities: ['text'],
+      supportedParameters: ['reasoning'], reasoningLevels: ['low', 'medium', 'high'],
+    }]));
+
+    expect(screen.getByText('Reasoning 档位')).toBeInTheDocument();
+    expect(screen.getByText('low / medium / high')).toBeInTheDocument();
+    expect(screen.getByText('参照另声明 medium')).toBeInTheDocument();
+    expect(screen.getByText('参照更广')).toBeInTheDocument();
+  });
+
+  it('labels a degraded snapshot reference without changing any verdict', () => {
+    renderDetail(model({ id: 'openai/gpt-4o' }), true, {
+      status: 'ready',
+      catalog: {
+        source: 'openrouter', url: 'https://openrouter.ai/api/v1/models', fetchedAt: '2026-09-30T00:00:00.000Z',
+        stale: true, staleReason: '参照目录上游返回 HTTP 500',
+        models: [{ id: 'openai/gpt-4o', contextWindow: 128000, inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] }],
+      },
+    });
+
+    expect(screen.getByText(/参照快照来自过期缓存/)).toBeInTheDocument();
+    expect(screen.getByText(/参照目录上游返回 HTTP 500/)).toBeInTheDocument();
+    expect(screen.getByText(/降级快照只用于展示，不影响端点探测结论/)).toBeInTheDocument();
   });
 
   it('keeps a missing reference entry neutral instead of unsupported', () => {

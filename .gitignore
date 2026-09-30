@@ -46,3 +46,6 @@ pnpm-debug.log*
 # Misc
 .cache/
 hmr-hmr.log
+
+# 本地临时件（参照基准再生成会下载第三方快照，体积大且可重建，绝不入库）
+.tmp-*
