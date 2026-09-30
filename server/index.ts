@@ -354,8 +354,61 @@ app.post('/api/proxy', async (req, res) => {
 // 仅返回目录数据与来源/抓取时间，不接触任何端点配置、用户 Key 或授权会话。
 const REFERENCE_UPSTREAM = 'https://openrouter.ai/api/v1/models';
 const REFERENCE_TTL_MS = 10 * 60 * 1000;
+const REFERENCE_TIMEOUT_MS = 10_000;
 const REFERENCE_MAX_BYTES = 8 * 1024 * 1024;
-let referenceCache: { fetchedAt: string; payload: unknown } | undefined;
+// 参照接口对客户端的固定响应形状。stale/staleReason 只在抓取失败降级时由路由层
+// 浅拷贝后附加，缓存里的 payload 始终是该类型的干净实例，因此显式命名而非 unknown。
+type ReferenceResponseBody = { url: string; fetchedAt: string; data: unknown };
+interface ReferencePayload { fetchedAt: string; payload: ReferenceResponseBody }
+let referenceCache: ReferencePayload | undefined;
+// single-flight：并发请求共享同一次上游抓取，避免 TTL 过期瞬间多个详情面板同时打上游
+let referenceInFlight: Promise<ReferencePayload> | undefined;
+
+// 流式读取并强制体积上限：与 /api/proxy 一致，上游不声明 content-length 时也不能无界缓冲
+async function readReferenceBody(response: Response): Promise<string> {
+  if (!response.body) throw new Error('参照目录上游响应为空');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > REFERENCE_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`参照目录超过 ${Math.floor(REFERENCE_MAX_BYTES / (1024 * 1024))} MiB 安全上限`);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
+}
+
+async function loadReferencePayload(): Promise<ReferencePayload> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REFERENCE_TIMEOUT_MS);
+  try {
+    const upstream = await fetch(REFERENCE_UPSTREAM, { headers: { Accept: 'application/json' }, signal: controller.signal, redirect: 'error' });
+    if (!upstream.ok) {
+      // 上游错误页与目录无关，丢弃响应体而不是先全量读进内存
+      await upstream.body?.cancel().catch(() => undefined);
+      throw new Error(`参照目录上游返回 HTTP ${upstream.status}`);
+    }
+    const declaredSize = Number(upstream.headers.get('content-length') ?? '0');
+    if (Number.isFinite(declaredSize) && declaredSize > REFERENCE_MAX_BYTES) {
+      await upstream.body?.cancel().catch(() => undefined);
+      throw new Error(`参照目录超过 ${Math.floor(REFERENCE_MAX_BYTES / (1024 * 1024))} MiB 安全上限`);
+    }
+    const text = await readReferenceBody(upstream);
+    const body: unknown = JSON.parse(text);
+    const entries = (body as { data?: unknown } | null)?.data;
+    if (!Array.isArray(entries)) throw new Error('参照目录响应结构不受支持');
+    const fetchedAt = new Date().toISOString();
+    // 对外只暴露扁平的条目数组：客户端与测试契约都是 { url, fetchedAt, data: [...] }
+    return { fetchedAt, payload: { url: REFERENCE_UPSTREAM, fetchedAt, data: entries } };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 app.get('/api/reference/models', async (_req, res) => {
   res.set('Cache-Control', 'no-store, max-age=0');
@@ -363,30 +416,36 @@ app.get('/api/reference/models', async (_req, res) => {
     res.json(referenceCache.payload);
     return;
   }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10_000);
   try {
-    const upstream = await fetch(REFERENCE_UPSTREAM, { headers: { Accept: 'application/json' }, signal: controller.signal, redirect: 'error' });
-    const size = Number(upstream.headers.get('content-length') ?? '0');
-    if (Number.isFinite(size) && size > REFERENCE_MAX_BYTES) throw new Error('参照目录超过体积上限');
-    const text = await upstream.text();
-    if (!upstream.ok) throw new Error(`参照目录上游返回 HTTP ${upstream.status}`);
-    if (Buffer.byteLength(text, 'utf8') > REFERENCE_MAX_BYTES) throw new Error('参照目录超过体积上限');
-    const data: unknown = JSON.parse(text);
-    if (!data || typeof data !== 'object' || !Array.isArray((data as { data?: unknown }).data)) {
-      throw new Error('参照目录响应结构不受支持');
-    }
-    const fetchedAt = new Date().toISOString();
-    referenceCache = { fetchedAt, payload: { url: REFERENCE_UPSTREAM, fetchedAt, data } };
-    res.json(referenceCache.payload);
+    referenceInFlight = referenceInFlight ?? loadReferencePayload()
+      .then((result) => {
+        referenceCache = result;
+        return result;
+      })
+      .finally(() => { referenceInFlight = undefined; });
+    const { payload } = await referenceInFlight;
+    // 成功路径返回的 payload 永远不带 stale：过期快照只在抓取失败时作为参照不可用的
+    // 降级展示，不参与这里的正常命中；上游恢复后抓取会按 TTL 继续刷新缓存。
+    res.json(payload);
   } catch (error) {
     const isAbort = error instanceof Error && error.name === 'AbortError';
+    const errorText = isAbort ? '参照目录获取超时' : error instanceof Error ? `参照目录获取失败：${error.message}` : '参照目录获取失败';
+    // 参照目录只是客户端做能力比对的外部基准，短暂取不到时展示旧快照比空白更有用；
+    // 但降级不能伪装成新鲜数据，所以标记在浅拷贝副本上附加，缓存本身始终保持干净，
+    // 否则下一次正常命中也会带上 stale，客户端无法判断上游是否已经恢复。
+    if (referenceCache) {
+      const staleBody: ReferenceResponseBody & { stale: true; staleReason: string } = {
+        ...referenceCache.payload,
+        stale: true,
+        staleReason: errorText,
+      };
+      res.json(staleBody);
+      return;
+    }
     res.status(502).json({
-      error: isAbort ? '参照目录获取超时' : error instanceof Error ? `参照目录获取失败：${error.message}` : '参照目录获取失败',
+      error: errorText,
       errorType: isAbort ? 'timeout' : 'network',
     });
-  } finally {
-    clearTimeout(timeout);
   }
 });
 
