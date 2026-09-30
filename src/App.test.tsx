@@ -25,9 +25,10 @@ describe('discovery workflow', () => {
   afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
   it('discovers and displays an OpenAI-compatible model', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/health')) return proxyHealthResponse();
+      if (url.endsWith('/api/reference/models')) return jsonResponse({ url: 'https://openrouter.ai/api/v1/models', fetchedAt: '2026-09-30T00:00:00.000Z', data: [] });
       if (url.endsWith('/api/session/history')) return jsonResponse({ history: [] });
       if (url.endsWith('/api/session/endpoints')) return jsonResponse({ endpointToken: 'session-token' });
       if (url.endsWith('/api/proxy')) {
@@ -51,12 +52,16 @@ describe('discovery workflow', () => {
     await waitFor(() => expect(screen.getAllByText('model-from-probe').length).toBeGreaterThan(0));
     expect(screen.getByText('GET /models')).toBeInTheDocument();
     expect(screen.getByText('探测完成')).toBeInTheDocument();
+    // 参照目录是独立只读通道：探测完成后即可比对，且不经过 /api/proxy
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/reference/models'))).toBe(true);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/api/proxy')).every(([, init]) => String(JSON.parse(String(init?.body)).endpointToken ?? '') === 'session-token')).toBe(true);
   });
 
   it('keeps OpenRouter discovery usable while surfacing an authentication failure', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.endsWith('/api/health')) return proxyHealthResponse();
+      if (url.endsWith('/api/reference/models')) return jsonResponse({ url: 'https://openrouter.ai/api/v1/models', fetchedAt: '2026-09-30T00:00:00.000Z', data: [] });
       if (url.endsWith('/api/session/history')) return jsonResponse({ history: [] });
       if (url.endsWith('/api/session/endpoints')) return jsonResponse({ endpointToken: 'openrouter-session' });
       if (url.endsWith('/api/proxy')) {
@@ -86,7 +91,6 @@ describe('discovery workflow', () => {
 
   it('shows an offline guard and blocks endpoint authorization when the proxy is unreachable', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('connection refused'));
-
     render(<App />);
     await waitFor(() => expect(screen.getByRole('button', { name: /本地代理离线/ })).toBeInTheDocument());
     expect(screen.getByRole('alert')).toHaveTextContent('页面可以继续编辑配置，但不会发送端点请求');
@@ -96,6 +100,8 @@ describe('discovery workflow', () => {
 
     await waitFor(() => expect(screen.getByText('本地受控代理不可用，请启动代理后重试')).toBeInTheDocument());
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/session/endpoints'))).toBe(false);
+    // 参照目录获取失败必须静默降级：不阻塞页面，也不产生探测类请求
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/proxy'))).toBe(false);
   });
 
   it('uses a closed configuration drawer on compact screens', async () => {
@@ -149,12 +155,12 @@ describe('discovery workflow', () => {
 
   it('restores an endpoint and API key from backend process history without saving it locally', async () => {
     const restored = { ...createProfile(), name: '历史端点', baseURL: 'https://api.anthropic.com/v1', apiKey: 'history-secret', protocol: 'anthropic', authMode: 'custom', customHeaderName: 'x-api-key' };
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input);
-      if (url.endsWith('/api/health')) return proxyHealthResponse();
+      if (url.endsWith('/api/reference/models')) return jsonResponse({ url: 'https://openrouter.ai/api/v1/models', fetchedAt: '2026-09-30T00:00:00.000Z', data: [] });
       if (url.endsWith('/api/session/history') && (!init?.method || init.method === 'GET')) return jsonResponse({ history: [{ id: 'history-1', name: restored.name, baseURL: restored.baseURL, providerLabel: 'Anthropic', protocol: restored.protocol, authMode: restored.authMode, hasApiKey: true, createdAt: restored.createdAt, lastUsedAt: restored.updatedAt }] });
       if (url.endsWith('/api/session/history/history-1/restore')) return jsonResponse({ profile: restored });
-      throw new Error(`Unexpected request: ${url}`);
+      return proxyHealthResponse();
     });
 
     render(<App />);
@@ -166,5 +172,6 @@ describe('discovery workflow', () => {
     await waitFor(() => expect(screen.getByPlaceholderText('https://api.example.com/v1 或完整请求 URL')).toHaveValue(restored.baseURL));
     expect(screen.getByLabelText('API Key')).toHaveValue('history-secret');
     expect(localStorage.getItem('llm-endpoint-probe:profiles:v1')).toBeNull();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/reference/models'))).toBe(true);
   });
 });

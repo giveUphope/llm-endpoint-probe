@@ -216,3 +216,23 @@ export interface ProxyResponse {
   headers: Record<string, string>;
   finalURL?: string;
 }
+
+// OpenRouter 公开模型目录的只读参照条目：仅用于与端点发现结果交叉比对展示，
+// 不参与探测请求、端点授权会话与任何配置回写
+export interface ReferenceModelEntry {
+  id: string;
+  name?: string;
+  alias?: boolean;
+  contextWindow?: number;
+  inputModalities: InputModality[];
+  /** undefined 表示目录未声明该字段，比对时一律记为“参照未覆盖” */
+  supportedParameters?: string[];
+  reasoningLevels: string[];
+}
+
+export interface ReferenceCatalog {
+  source: 'openrouter';
+  url: string;
+  fetchedAt: string;
+  models: ReferenceModelEntry[];
+}

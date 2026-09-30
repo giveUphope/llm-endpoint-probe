@@ -1,5 +1,5 @@
 import { emptyCapabilities, evidence, inferCapabilities, modelConfidence } from '../domain/capabilities';
-import type { AdapterRequest, DiscoveredModel, ProtocolType } from '../domain/types';
+import type { AdapterRequest, CapabilityKey, DiscoveredModel, ProtocolType } from '../domain/types';
 import { sanitizeData } from '../lib/security';
 
 // 目录声明的接口类型 → 可复用的协议（用于多接口交叉验证）；
@@ -26,6 +26,20 @@ const ENDPOINT_TYPE_PATHS: Record<string, string> = {
   'openai-video': '/videos/generations',
   doubao: '/chat/completions',
   jimeng: '/images/generations',
+};
+
+// supported_parameters 参数名 → 能力键；端点目录归一化与 OpenRouter 参照比对共用同一映射
+export const PARAMETER_CAPABILITIES: Record<CapabilityKey, string[]> = {
+  supportsTools: ['tools', 'tool_choice'],
+  supportsJsonMode: ['response_format'],
+  supportsStructuredOutput: ['structured_outputs'],
+  supportsReasoning: ['reasoning', 'reasoning_effort', 'include_reasoning'],
+  supportsTemperature: ['temperature'],
+  supportsTopP: ['top_p'],
+  supportsStop: ['stop'],
+  supportsSeed: ['seed'],
+  supportsStreaming: ['stream'],
+  supportsPromptCache: ['cache_control'],
 };
 
 export function interfaceLabel(key: string): string {
@@ -167,19 +181,7 @@ export function normalizeModel(raw: Record<string, unknown>, protocol: ProtocolT
     ...(Array.isArray(raw.supported_parameters) ? raw.supported_parameters : []),
     ...(Array.isArray(raw.supported_sampling_parameters) ? raw.supported_sampling_parameters : []),
   ].map((item) => String(item).toLowerCase()));
-  const parameterCapabilities: Partial<Record<keyof typeof capabilities, string[]>> = {
-    supportsTools: ['tools', 'tool_choice'],
-    supportsJsonMode: ['response_format'],
-    supportsStructuredOutput: ['structured_outputs'],
-    supportsReasoning: ['reasoning', 'reasoning_effort', 'include_reasoning'],
-    supportsTemperature: ['temperature'],
-    supportsTopP: ['top_p'],
-    supportsStop: ['stop'],
-    supportsSeed: ['seed'],
-    supportsStreaming: ['stream'],
-    supportsPromptCache: ['cache_control'],
-  };
-  for (const [key, parameters] of Object.entries(parameterCapabilities)) {
+  for (const [key, parameters] of Object.entries(PARAMETER_CAPABILITIES)) {
     const matched = parameters?.filter((parameter) => supportedParameters.has(parameter)) ?? [];
     if (matched.length) {
       capabilities[key as keyof typeof capabilities] = {

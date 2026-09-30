@@ -2,10 +2,18 @@ import type {
   CapabilityEvidence,
   CapabilityKey,
   CapabilityStatus,
+  CapabilityValue,
   Confidence,
   DiscoveredModel,
   InputModality,
 } from './types';
+
+export const capabilityValueLabels: Record<CapabilityValue, string> = {
+  supported: '支持',
+  unsupported: '不支持',
+  unknown: '未知',
+  inferred: '推测',
+};
 
 export const capabilityKeys: CapabilityKey[] = [
   'supportsTools',

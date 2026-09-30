@@ -9,6 +9,7 @@ import type { CapabilityKey, DiscoveryRun, DiscoveredModel, EndpointProfile, Req
 import { createProfile, uid } from './lib/profile';
 import { discover, modelGenerationInterfaces, modelProbeInterfaces, validateModel } from './services/discovery';
 import { checkProxyHealth, clearEndpointHistory, listEndpointHistory, restoreEndpointHistory, type EndpointHistoryItem } from './services/proxy';
+import { fetchReferenceCatalog, type ReferenceState } from './services/reference';
 
 const confidenceOrder = { unknown: 0, low: 1, medium: 2, high: 3 };
 
@@ -48,6 +49,18 @@ export default function App() {
   const healthCheckSequence = useRef(0);
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const previousSidebarOpen = useRef(sidebarOpen);
+  const referenceRequested = useRef(false);
+  const [reference, setReference] = useState<ReferenceState>({ status: 'loading' });
+
+  // OpenRouter 参照目录：只读拉取一次用于模型信息比对，失败时降级展示且不影响探测
+  const loadReference = useCallback(async () => {
+    setReference({ status: 'loading' });
+    try {
+      setReference({ status: 'ready', catalog: await fetchReferenceCatalog() });
+    } catch (error) {
+      setReference({ status: 'error', message: error instanceof Error ? error.message : '参照目录获取失败' });
+    }
+  }, []);
 
   const refreshProxyHealth = useCallback(async (showChecking = true): Promise<boolean> => {
     const sequence = ++healthCheckSequence.current;
@@ -101,6 +114,16 @@ export default function App() {
       setHistoryLoading(false);
     }
   }, [proxyHealth.status, refreshEndpointHistory]);
+
+  useEffect(() => {
+    if (proxyHealth.status === 'online' && !referenceRequested.current) {
+      referenceRequested.current = true;
+      void loadReference();
+    }
+    if (proxyHealth.status === 'offline' && reference.status === 'loading') {
+      setReference({ status: 'error', message: '本地受控代理离线，暂无法获取参照目录' });
+    }
+  }, [proxyHealth.status, reference.status, loadReference]);
 
   useEffect(() => {
     const syncLayout = () => {
@@ -233,7 +256,7 @@ export default function App() {
         <div className="view-tabs"><button className={activeView === 'models' ? 'active' : ''} onClick={() => setActiveView('models')}><Braces size={15} />模型结果 <span>{run?.models.length ?? 0}</span></button><button className={activeView === 'logs' ? 'active' : ''} onClick={() => setActiveView('logs')}><ScrollText size={15} />探测与请求 <span>{run?.requests.length ?? 0}</span></button></div>
         {activeView === 'models' ? <ModelsTable models={filteredModels} selectedId={selectedId} search={search} capabilityFilter={capabilityFilter} confidenceFilter={confidenceFilter} protocolFilter={protocolFilter} statusFilter={statusFilter} sortKey={sortKey} sortDirection={sortDirection} onSearch={setSearch} onCapabilityFilter={setCapabilityFilter} onConfidenceFilter={setConfidenceFilter} onProtocolFilter={setProtocolFilter} onStatusFilter={setStatusFilter} onSort={handleSort} onSelect={(model) => setSelectedId(model.id)} /> : <ProbeLog run={run} />}
       </main>
-      {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} canValidate={profile.allowValidation} onValidate={() => setValidationModel(selectedModel)} />}
+      {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} canValidate={profile.allowValidation} onValidate={() => setValidationModel(selectedModel)} reference={reference} onRetryReference={() => { referenceRequested.current = true; void loadReference(); }} />}
     </div>
     {validationModel && <ValidationDialog modelName={validationModel.displayName} interfaces={modelProbeInterfaces(validationModel).length} generationInterfaces={modelGenerationInterfaces(validationModel).length} onClose={() => setValidationModel(undefined)} onStart={runValidation} />}
     {toast && <div className="toast"><Activity size={15} />{toast}</div>}

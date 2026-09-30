@@ -1,11 +1,18 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { emptyCapabilities } from '../domain/capabilities';
-import type { DiscoveredModel, RequestRecord } from '../domain/types';
+import type { DiscoveredModel, ReferenceCatalog, RequestRecord } from '../domain/types';
 import { PROBE_FAKE_MODEL_ID } from '../adapters/shared';
+import type { ReferenceState } from '../services/reference';
 import { ModelDetail } from './ModelDetail';
 
 afterEach(() => cleanup());
+
+const referenceUnavailable: ReferenceState = { status: 'error', message: '参照目录获取失败：本地受控代理不可达' };
+
+function readyCatalog(models: ReferenceCatalog['models']): ReferenceState {
+  return { status: 'ready', catalog: { source: 'openrouter', url: 'https://openrouter.ai/api/v1/models', fetchedAt: '2026-09-30T00:00:00.000Z', models } };
+}
 
 function model(overrides: Partial<DiscoveredModel> = {}): DiscoveredModel {
   return {
@@ -25,8 +32,8 @@ function model(overrides: Partial<DiscoveredModel> = {}): DiscoveredModel {
   };
 }
 
-function renderDetail(m: DiscoveredModel, canValidate = true) {
-  render(<ModelDetail model={m} requests={[]} canValidate={canValidate} onClose={() => undefined} onValidate={() => undefined} />);
+function renderDetail(m: DiscoveredModel, canValidate = true, reference: ReferenceState = referenceUnavailable) {
+  render(<ModelDetail model={m} requests={[]} canValidate={canValidate} onClose={() => undefined} onValidate={() => undefined} reference={reference} onRetryReference={() => undefined} />);
 }
 
 describe('ModelDetail model name verification', () => {
@@ -167,5 +174,71 @@ describe('ModelDetail model name verification', () => {
     }));
 
     expect(screen.getByText('响应内容一致：真实名与虚假名返回完全相同的输出，强烈指向同一上游')).toBeInTheDocument();
+  });
+});
+
+describe('ModelDetail OpenRouter reference comparison', () => {
+  it('shows a read-only reference verdict with conflicts and snapshot timestamp', () => {
+    const m = model({ id: 'gpt-4o', contextWindow: 16000, inputModalities: ['text'] });
+    m.capabilities.supportsTools = {
+      value: 'supported',
+      evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }],
+    };
+    m.capabilities.supportsJsonMode = {
+      value: 'supported',
+      evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 JSON 输出', timestamp: '2026-09-30T00:00:00.000Z' }],
+    };
+    m.capabilities.supportsTemperature = {
+      value: 'unsupported',
+      evidence: [{ source: 'endpoint', confidence: 'medium', detail: '目录未声明', timestamp: '2026-09-30T00:00:00.000Z' }],
+    };
+    renderDetail(m, true, readyCatalog([{
+      id: 'openai/gpt-4o',
+      name: 'OpenAI: GPT-4o',
+      contextWindow: 128000,
+      inputModalities: ['text', 'image'],
+      supportedParameters: ['temperature'],
+      reasoningLevels: [],
+    }]));
+
+    expect(screen.getByText('OpenRouter 参照比对')).toBeInTheDocument();
+    expect(screen.getByText('openai/gpt-4o · OpenAI: GPT-4o')).toBeInTheDocument();
+    expect(screen.getByText('目录快照')).toBeInTheDocument();
+    expect(screen.getByText(/3 项能力声明冲突/)).toBeInTheDocument();
+    expect(screen.getByText(/上下文窗口不一致/)).toBeInTheDocument();
+    expect(screen.getByText(/输入模态不一致/)).toBeInTheDocument();
+    expect(screen.getByText('以下为 OpenRouter 公开目录的第三方声明，仅用于与当前端点结果交叉比对；出现冲突时，以当前端点的实测（validated）证据为准。')).toBeInTheDocument();
+    expect(screen.getAllByText('冲突').length).toBeGreaterThanOrEqual(3);
+    expect(screen.getAllByText('参照未覆盖').length).toBeGreaterThanOrEqual(4);
+    expect(screen.getAllByText('待端点验证').length).toBeGreaterThan(0);
+  });
+
+  it('reports no conflicts when both sides agree on definitive values', () => {
+    const m = model({ contextWindow: 128000 });
+    m.capabilities.supportsTools = {
+      value: 'supported',
+      evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }],
+    };
+    renderDetail(m, true, readyCatalog([{
+      id: 'my-fake-model',
+      contextWindow: 128000,
+      inputModalities: ['text'],
+      supportedParameters: ['tools', 'temperature'],
+      reasoningLevels: [],
+    }]));
+
+    expect(screen.getByText(/端点结论与参照目录声明未发现冲突/)).toBeInTheDocument();
+    expect(screen.queryByText('冲突')).not.toBeInTheDocument();
+  });
+
+  it('keeps a missing reference entry neutral instead of unsupported', () => {
+    renderDetail(model({ id: 'totally-unknown-model' }), true, readyCatalog([{ id: 'openai/gpt-4o', inputModalities: ['text'], supportedParameters: [], reasoningLevels: [] }]));
+    expect(screen.getByText('OpenRouter 公开目录中未匹配到「totally-unknown-model」：无法交叉比对。参照缺失不代表该端点或模型不支持任何能力。')).toBeInTheDocument();
+    expect(screen.queryByText('不支持')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a degraded reference state without touching probe results', () => {
+    renderDetail(model(), true, { status: 'error', message: '参照目录获取失败：本地受控代理不可达' });
+    expect(screen.getByText('参照目录不可用：参照目录获取失败：本地受控代理不可达。参照不可用不会改变端点探测结论。')).toBeInTheDocument();
   });
 });

@@ -186,6 +186,16 @@ code, pre { font-family: "Cascadia Code", Consolas, monospace; }
 .subsection-heading { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .subsection-heading strong { font-size: var(--fs-xs); }
 .subsection-heading > span { color: var(--muted); font-size: var(--fs-2xs); }
+.ref-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; padding: 8px 9px; border: 1px dashed var(--line); border-radius: 4px; color: var(--muted); font-size: var(--fs-2xs); line-height: 1.5; }
+.ref-note.warn { border-style: solid; border-color: #ecd092; color: #6f510f; background: #fff9e9; }
+.ref-table { display: grid; gap: 1px; margin-top: 9px; border: 1px solid var(--line); background: var(--line); }
+.ref-row { display: grid; grid-template-columns: minmax(56px, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(48px, 0.8fr); gap: 8px; align-items: baseline; padding: 6px 10px; background: white; font-size: var(--fs-2xs); }
+.ref-row.ref-head { color: var(--muted); background: #f7f9fa; }
+.ref-label { color: #334149; overflow-wrap: anywhere; }
+.ref-value { color: var(--muted); overflow-wrap: anywhere; }
+.ref-match { color: #08714c; }
+.ref-conflict { color: var(--danger); font-weight: 600; }
+.ref-muted { color: var(--muted); }
 .capability-matrix { border-top: 1px solid var(--line); }
 .capability-row { display: grid; grid-template-columns: 105px 70px 1fr; align-items: start; gap: 8px; padding: 9px 2px; border-bottom: 1px solid var(--soft-line); font-size: var(--fs-2xs); }
 .capability-row > span:first-child { padding-top: 3px; font-weight: 600; }

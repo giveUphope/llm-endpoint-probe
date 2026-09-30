@@ -350,6 +350,46 @@ app.post('/api/proxy', async (req, res) => {
   }
 });
 
+// OpenRouter 公开模型目录的只读参照代理：固定白名单主机、免会话令牌、TTL 缓存。
+// 仅返回目录数据与来源/抓取时间，不接触任何端点配置、用户 Key 或授权会话。
+const REFERENCE_UPSTREAM = 'https://openrouter.ai/api/v1/models';
+const REFERENCE_TTL_MS = 10 * 60 * 1000;
+const REFERENCE_MAX_BYTES = 8 * 1024 * 1024;
+let referenceCache: { fetchedAt: string; payload: unknown } | undefined;
+
+app.get('/api/reference/models', async (_req, res) => {
+  res.set('Cache-Control', 'no-store, max-age=0');
+  if (referenceCache && Date.now() - Date.parse(referenceCache.fetchedAt) < REFERENCE_TTL_MS) {
+    res.json(referenceCache.payload);
+    return;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const upstream = await fetch(REFERENCE_UPSTREAM, { headers: { Accept: 'application/json' }, signal: controller.signal, redirect: 'error' });
+    const size = Number(upstream.headers.get('content-length') ?? '0');
+    if (Number.isFinite(size) && size > REFERENCE_MAX_BYTES) throw new Error('参照目录超过体积上限');
+    const text = await upstream.text();
+    if (!upstream.ok) throw new Error(`参照目录上游返回 HTTP ${upstream.status}`);
+    if (Buffer.byteLength(text, 'utf8') > REFERENCE_MAX_BYTES) throw new Error('参照目录超过体积上限');
+    const data: unknown = JSON.parse(text);
+    if (!data || typeof data !== 'object' || !Array.isArray((data as { data?: unknown }).data)) {
+      throw new Error('参照目录响应结构不受支持');
+    }
+    const fetchedAt = new Date().toISOString();
+    referenceCache = { fetchedAt, payload: { url: REFERENCE_UPSTREAM, fetchedAt, data } };
+    res.json(referenceCache.payload);
+  } catch (error) {
+    const isAbort = error instanceof Error && error.name === 'AbortError';
+    res.status(502).json({
+      error: isAbort ? '参照目录获取超时' : error instanceof Error ? `参照目录获取失败：${error.message}` : '参照目录获取失败',
+      errorType: isAbort ? 'timeout' : 'network',
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
 app.get('/api/health', (_req, res) => {
   res.set('Cache-Control', 'no-store, max-age=0');
   res.json({
