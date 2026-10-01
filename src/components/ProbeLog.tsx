@@ -12,7 +12,6 @@ function FormattedJson({ data }: { data: unknown }) {
 function RequestItem({ request }: { request: RequestRecord }) {
   const [open, setOpen] = useState(false);
   const [rawHeaders, setRawHeaders] = useState(false);
-  const [rawBody, setRawBody] = useState(false);
   return (
     <div className="request-item">
       <button className="request-summary" onClick={() => setOpen(!open)}>
@@ -28,14 +27,6 @@ function RequestItem({ request }: { request: RequestRecord }) {
           </span>
           {rawHeaders ? <FormattedJson data={request.requestHeaders} /> : <ResponsePreview value={request.requestHeaders} />}
         </div>
-        {request.requestBody != null && <div>
-          <span>
-            <FileJson size={13} style={{ verticalAlign: 'middle', marginRight: 4 }} />
-            请求体摘要
-            <button className="icon-button subtle" style={{ marginLeft: 6, verticalAlign: 'middle' }} onClick={() => setRawBody(!rawBody)} title="切换原始视图">原始</button>
-          </span>
-          {rawBody ? <FormattedJson data={request.requestBody} /> : <ResponsePreview value={request.requestBody} />}
-        </div>}
         <div><span>响应预览</span>{request.errorMessage ? <pre>{request.errorMessage}</pre> : <ResponsePreview value={request.responsePreview} />}</div>
       </div>}
     </div>
