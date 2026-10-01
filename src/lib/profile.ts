@@ -16,7 +16,6 @@ export function createProfile(): EndpointProfile {
     headers: [],
     queryParams: [],
     timeoutMs: 15000,
-    allowValidation: false,
     allowLocalNetwork: false,
     createdAt: now,
     updatedAt: now,

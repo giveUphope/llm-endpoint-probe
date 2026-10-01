@@ -5,8 +5,12 @@ import { ValidationDialog } from './components/Dialogs';
 import { ModelDetail } from './components/ModelDetail';
 import { ModelsTable, type SortKey } from './components/ModelsTable';
 import { ProbeLog } from './components/ProbeLog';
+import { capabilityKeys } from './domain/capabilities';
 import type { CapabilityKey, DiscoveryRun, DiscoveredModel, EndpointProfile, RequestRecord } from './domain/types';
 import { createProfile, uid } from './lib/profile';
+import { canValidateWithoutKey, detectProvider } from './lib/providers';
+import { normalizeApiKey } from './lib/security';
+import { createSampleRun } from './lib/sample';
 import { discover, modelGenerationInterfaces, modelProbeInterfaces, validateModel } from './services/discovery';
 import { checkProxyHealth, clearEndpointHistory, listEndpointHistory, restoreEndpointHistory, type EndpointHistoryItem } from './services/proxy';
 import { fetchReferenceCatalog, type ReferenceState } from './services/reference';
@@ -155,6 +159,15 @@ export default function App() {
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2800); };
   const updateProfile = (next: EndpointProfile) => setProfile(next);
 
+  // 仅开发环境暴露：用演示模型填充展示层，便于在没有真实端点和密钥时目测
+  // 参照比对与判定分级；示例不发送任何请求，也不写入证据链或配置
+  const loadSampleModels = () => {
+    const sampleRun = createSampleRun();
+    setRun(sampleRun);
+    setSelectedId(sampleRun.models[0]?.id);
+    notify('已载入示例模型：演示数据不发送任何请求');
+  };
+
   const restoreHistory = async (historyId: string) => {
     if (!await refreshProxyHealth()) { notify('本地受控代理不可用，无法还原历史'); return; }
     setHistoryLoading(true);
@@ -213,7 +226,9 @@ export default function App() {
       updatedAt: new Date().toISOString(),
     }));
     if (result.models.length) { setSelectedId(result.models[0].id); setActiveView('models'); }
-    notify(result.status === 'success' ? `探测完成：发现 ${result.models.length} 个模型` : result.status === 'partial' ? `发现 ${result.models.length} 个模型，但认证诊断存在问题` : result.status === 'cancelled' ? '探测已取消' : '探测未完成，请查看错误详情');
+    const unvalidated = result.models.filter((model) => model.status !== 'validated' && model.status !== 'validating').length;
+    const tail = unvalidated ? `；${unvalidated} 个未完成自动验证（免密跳过或中断），可在列表上方继续` : '';
+    notify(result.status === 'success' ? `探测完成：发现 ${result.models.length} 个模型${tail}` : result.status === 'partial' ? `发现 ${result.models.length} 个模型，但认证诊断存在问题${tail}` : result.status === 'cancelled' ? '探测已取消' : '探测未完成，请查看错误详情');
   };
 
   const runValidation = async (items: CapabilityKey[]) => {
@@ -230,6 +245,47 @@ export default function App() {
       return { ...current, requests };
     })).catch((error: Error) => { notify(`验证失败：${error.message}`); return null; });
     if (result) { setRun((current) => current ? { ...current, models: current.models.map((item) => item.id === result.id ? result : item) } : current); notify(result.status === 'partial' ? '验证已取消，已保留完成的证据' : '模型能力验证完成（含名称真实性校验）'); }
+  };
+
+  const provider = useMemo(() => detectProvider(profile.baseURL), [profile.baseURL]);
+  // 没有可用凭据且端点不是匿名可用时，验证只会换来成片 401：显式继续也不给按
+  const validationPossible = Boolean(normalizeApiKey(profile.apiKey, profile.authMode)) || canValidateWithoutKey(profile, provider);
+  const unvalidatedModels = useMemo(
+    () => (run?.models ?? []).filter((model) => model.status !== 'validated' && model.status !== 'validating'),
+    [run],
+  );
+  const probeRunning = run?.status === 'running' || Boolean(run?.models.some((model) => model.status === 'validating'));
+  // 示例运行不接网络：避免“继续验证”把演示端点当真去发请求
+  const realRunSelected = Boolean(run && run.endpointId !== 'sample-endpoint');
+  const canValidateRemaining = realRunSelected && !probeRunning && validationPossible && unvalidatedModels.length > 0;
+  const remainingBlocked = realRunSelected && unvalidatedModels.length > 0 && !validationPossible;
+
+  // 免密跳过或验证中断的模型由用户显式继续：这是主动动作，需要端点确实可用
+  const validateRemaining = async () => {
+    if (!run || !validationPossible) return;
+    if (!await refreshProxyHealth()) { notify('本地受控代理不可用，未发送验证请求'); return; }
+    const targets = unvalidatedModels;
+    if (!targets.length) return;
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    let completed = 0;
+    for (const target of targets) {
+      if (controller.signal.aborted) break;
+      setRun((current) => current ? {
+        ...current,
+        models: current.models.map((item) => item.id === target.id ? { ...item, status: 'validating' as const } : item),
+      } : current);
+      const result = await validateModel(profile, target, capabilityKeys, controller.signal, (request: RequestRecord) => setRun((current) => {
+        if (!current || current.requests.some((item) => item.id === request.id)) return current;
+        return { ...current, requests: [...current.requests, request] };
+      })).catch((error: Error) => { notify(`验证中断：${error.message}`); return null; });
+      if (!result) continue;
+      completed += 1;
+      setRun((current) => current ? { ...current, models: current.models.map((item) => item.id === result.id ? result : item) } : current);
+    }
+    notify(completed >= targets.length
+      ? `补验证完成：${completed}/${targets.length} 个模型`
+      : `补验证已停止：完成 ${completed}/${targets.length} 个模型，已保留证据`);
   };
 
   const filteredModels = useMemo(() => {
@@ -254,9 +310,9 @@ export default function App() {
       <main className="main-workspace">
         <div className="workspace-heading"><div className="heading-left"><button ref={toggleRef} className="icon-button" title={sidebarOpen ? '收起配置' : '展开配置'} aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(!sidebarOpen)}>{sidebarOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}</button><div><span className="eyebrow">工作台</span><h2>{profile.name}</h2></div></div><div className="run-state"><span className={`run-dot run-${run?.status || 'idle'}`} />{run ? ({ running: '探测进行中', success: '探测完成', partial: '部分完成', error: '探测失败', cancelled: '已取消', idle: '未开始' }[run.status]) : '等待探测'}</div></div>
         <div className="view-tabs"><button className={activeView === 'models' ? 'active' : ''} onClick={() => setActiveView('models')}><Braces size={15} />模型结果 <span>{run?.models.length ?? 0}</span></button><button className={activeView === 'logs' ? 'active' : ''} onClick={() => setActiveView('logs')}><ScrollText size={15} />探测与请求 <span>{run?.requests.length ?? 0}</span></button></div>
-        {activeView === 'models' ? <ModelsTable models={filteredModels} selectedId={selectedId} search={search} capabilityFilter={capabilityFilter} confidenceFilter={confidenceFilter} protocolFilter={protocolFilter} statusFilter={statusFilter} sortKey={sortKey} sortDirection={sortDirection} onSearch={setSearch} onCapabilityFilter={setCapabilityFilter} onConfidenceFilter={setConfidenceFilter} onProtocolFilter={setProtocolFilter} onStatusFilter={setStatusFilter} onSort={handleSort} onSelect={(model) => setSelectedId(model.id)} /> : <ProbeLog run={run} />}
+        {activeView === 'models' ? <ModelsTable models={filteredModels} selectedId={selectedId} search={search} capabilityFilter={capabilityFilter} confidenceFilter={confidenceFilter} protocolFilter={protocolFilter} statusFilter={statusFilter} sortKey={sortKey} sortDirection={sortDirection} onSearch={setSearch} onCapabilityFilter={setCapabilityFilter} onConfidenceFilter={setConfidenceFilter} onProtocolFilter={setProtocolFilter} onStatusFilter={setStatusFilter} onSort={handleSort} onSelect={(model) => setSelectedId(model.id)} onLoadSample={import.meta.env.DEV ? loadSampleModels : undefined} remainingCount={unvalidatedModels.length} remainingBlocked={remainingBlocked} onValidateRemaining={canValidateRemaining ? validateRemaining : undefined} /> : <ProbeLog run={run} />}
       </main>
-      {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} canValidate={profile.allowValidation} onValidate={() => setValidationModel(selectedModel)} reference={reference} onRetryReference={() => { referenceRequested.current = true; void loadReference(); }} />}
+      {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} onValidate={() => setValidationModel(selectedModel)} reference={reference} onRetryReference={() => { referenceRequested.current = true; void loadReference(); }} />}
     </div>
     {validationModel && <ValidationDialog modelName={validationModel.displayName} interfaces={modelProbeInterfaces(validationModel).length} generationInterfaces={modelGenerationInterfaces(validationModel).length} onClose={() => setValidationModel(undefined)} onStart={runValidation} />}
     {toast && <div className="toast"><Activity size={15} />{toast}</div>}

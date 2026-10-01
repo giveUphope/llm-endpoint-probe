@@ -122,7 +122,6 @@ function endpointProfile(value: unknown): EndpointProfile {
     headers: [],
     queryParams,
     timeoutMs: Math.min(Math.max(Number(source.timeoutMs) || 15_000, 1_000), 120_000),
-    allowValidation: source.allowValidation === true,
     allowLocalNetwork: source.allowLocalNetwork === true,
     createdAt: textValue(source.createdAt, now, 64),
     updatedAt: now,

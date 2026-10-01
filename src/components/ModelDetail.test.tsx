@@ -32,8 +32,8 @@ function model(overrides: Partial<DiscoveredModel> = {}): DiscoveredModel {
   };
 }
 
-function renderDetail(m: DiscoveredModel, canValidate = true, reference: ReferenceState = referenceUnavailable) {
-  render(<ModelDetail model={m} requests={[]} canValidate={canValidate} onClose={() => undefined} onValidate={() => undefined} reference={reference} onRetryReference={() => undefined} />);
+function renderDetail(m: DiscoveredModel, reference: ReferenceState = referenceUnavailable) {
+  render(<ModelDetail model={m} requests={[]} onClose={() => undefined} onValidate={() => undefined} reference={reference} onRetryReference={() => undefined} />);
 }
 
 describe('ModelDetail model name verification', () => {
@@ -70,8 +70,12 @@ describe('ModelDetail model name verification', () => {
   });
 
   it('mentions the fake-name probe in the validation hint', () => {
-    renderDetail(model(), true);
-    expect(screen.getByText('验证会额外发送虚假模型名请求，比对端点回显以排查名称真实性（多接口模型将逐接口执行）。')).toBeInTheDocument();
+    renderDetail(model());
+    expect(screen.getByText('探测已自动验证全部能力；这里可重新验证。验证会再次发送最小请求，包括虚假模型名请求，用于比对端点回显以排查名称真实性（多接口模型将逐接口执行）。')).toBeInTheDocument();
+    // 主动验证不再有开关：既没有“未允许”状态，按钮也永远可用
+    const button = screen.getByRole('button', { name: /重新验证能力/ });
+    expect(button).toBeEnabled();
+    expect(screen.queryByText(/未允许主动验证|允许主动验证/)).not.toBeInTheDocument();
   });
 
   it('shows vendor, declared interfaces and the probe rejection reason', () => {
@@ -192,7 +196,7 @@ describe('ModelDetail OpenRouter reference comparison', () => {
       value: 'unsupported',
       evidence: [{ source: 'endpoint', confidence: 'medium', detail: '目录未声明', timestamp: '2026-09-30T00:00:00.000Z' }],
     };
-    renderDetail(m, true, readyCatalog([{
+    renderDetail(m, readyCatalog([{
       id: 'openai/gpt-4o',
       name: 'OpenAI: GPT-4o',
       contextWindow: 128000,
@@ -223,7 +227,7 @@ describe('ModelDetail OpenRouter reference comparison', () => {
       value: 'supported',
       evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }],
     };
-    renderDetail(m, true, readyCatalog([{
+    renderDetail(m, readyCatalog([{
       id: 'my-fake-model',
       contextWindow: 128000,
       inputModalities: ['text'],
@@ -241,7 +245,7 @@ describe('ModelDetail OpenRouter reference comparison', () => {
       value: 'supported',
       evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 schema 合规输出', timestamp: '2026-09-30T00:00:00.000Z' }],
     };
-    renderDetail(m, true, readyCatalog([
+    renderDetail(m, readyCatalog([
       { id: 'openai/gpt-6.1-sol:batch', canonicalSlug: 'openai/gpt-6.1-sol', tier: 'batch', contextWindow: 1050000, inputModalities: ['text'], supportedParameters: ['structured_outputs'], reasoningLevels: [] },
       { id: 'openai/gpt-6.1-sol', canonicalSlug: 'openai/gpt-6.1-sol', contextWindow: 1050000, inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] },
     ]));
@@ -258,7 +262,7 @@ describe('ModelDetail OpenRouter reference comparison', () => {
       value: 'supported',
       evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }],
     };
-    renderDetail(m, true, readyCatalog([
+    renderDetail(m, readyCatalog([
       { id: 'meta-llama/llama-3.1-8b', canonicalSlug: 'meta-llama/llama-3.1-8b', contextWindow: 128000, inputModalities: ['text'], supportedParameters: [], reasoningLevels: [] },
       { id: 'meta-cloud/llama-3.1-8b', canonicalSlug: 'meta-cloud/llama-3.1-8b', contextWindow: 128000, inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] },
     ]));
@@ -274,7 +278,7 @@ describe('ModelDetail OpenRouter reference comparison', () => {
       value: 'supported',
       evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }],
     };
-    renderDetail(m, true, readyCatalog([
+    renderDetail(m, readyCatalog([
       { id: 'openai/gpt-4o', canonicalSlug: 'openai/gpt-4o', contextWindow: 128000, inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] },
       { id: 'relay-mirror/gpt-4o', canonicalSlug: 'relay-mirror/gpt-4o', contextWindow: 128000, inputModalities: ['text'], supportedParameters: [], reasoningLevels: [] },
     ]));
@@ -285,7 +289,7 @@ describe('ModelDetail OpenRouter reference comparison', () => {
 
   it('compares reasoning effort levels as its own row', () => {
     const m = model({ id: 'thinker', contextWindow: 128000, inputModalities: ['text'], reasoningLevels: ['low', 'high'] });
-    renderDetail(m, true, readyCatalog([{
+    renderDetail(m, readyCatalog([{
       id: 'x/thinker', canonicalSlug: 'x/thinker', contextWindow: 128000, inputModalities: ['text'],
       supportedParameters: ['reasoning'], reasoningLevels: ['low', 'medium', 'high'],
     }]));
@@ -297,7 +301,7 @@ describe('ModelDetail OpenRouter reference comparison', () => {
   });
 
   it('labels a degraded snapshot reference without changing any verdict', () => {
-    renderDetail(model({ id: 'openai/gpt-4o' }), true, {
+    renderDetail(model({ id: 'openai/gpt-4o' }), {
       status: 'ready',
       catalog: {
         source: 'openrouter', url: 'https://openrouter.ai/api/v1/models', fetchedAt: '2026-09-30T00:00:00.000Z',
@@ -312,13 +316,13 @@ describe('ModelDetail OpenRouter reference comparison', () => {
   });
 
   it('keeps a missing reference entry neutral instead of unsupported', () => {
-    renderDetail(model({ id: 'totally-unknown-model' }), true, readyCatalog([{ id: 'openai/gpt-4o', inputModalities: ['text'], supportedParameters: [], reasoningLevels: [] }]));
+    renderDetail(model({ id: 'totally-unknown-model' }), readyCatalog([{ id: 'openai/gpt-4o', inputModalities: ['text'], supportedParameters: [], reasoningLevels: [] }]));
     expect(screen.getByText('OpenRouter 公开目录中未匹配到「totally-unknown-model」：无法交叉比对。参照缺失不代表该端点或模型不支持任何能力。')).toBeInTheDocument();
     expect(screen.queryByText('不支持')).not.toBeInTheDocument();
   });
 
   it('surfaces a degraded reference state without touching probe results', () => {
-    renderDetail(model(), true, { status: 'error', message: '参照目录获取失败：本地受控代理不可达' });
+    renderDetail(model(), { status: 'error', message: '参照目录获取失败：本地受控代理不可达' });
     expect(screen.getByText('参照目录不可用：参照目录获取失败：本地受控代理不可达。参照不可用不会改变端点探测结论。')).toBeInTheDocument();
   });
 });

@@ -16,6 +16,8 @@ export interface ProviderPreset {
   optionalHeaders?: string[];
   supportedEndpoints?: string[];
   authenticationRequest?: AdapterRequest;
+  /** 模型目录可匿名读取（免密），但生成接口仍需凭据 */
+  keylessCatalog?: boolean;
   matches(url: URL): boolean;
 }
 
@@ -31,6 +33,7 @@ export const providerPresets: ProviderPreset[] = [
     recommendedBaseURL: 'https://openrouter.ai/api/v1', apiKeyHint: '填写 sk-or-v1-...；无需粘贴 Bearer 前缀。',
     note: '采用 OpenAI Chat 兼容协议；模型目录可匿名读取，能力验证需要有效密钥。',
     optionalHeaders: ['HTTP-Referer', 'X-OpenRouter-Title'], supportedEndpoints: ['/chat/completions'],
+    keylessCatalog: true,
     authenticationRequest: { method: 'GET', path: '/key' },
     matches: (url) => url.hostname.toLowerCase() === 'openrouter.ai' || url.hostname.toLowerCase().endsWith('.openrouter.ai'),
   },
@@ -168,4 +171,24 @@ export function resolveProviderProfile(profile: EndpointProfile): { profile: End
       updatedAt: new Date().toISOString(),
     },
   };
+}
+
+const PRIVATE_HOST = [/^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^\[?::1\]?$/, /^localhost$/];
+
+// 免密能不能验证：目录匿名可读不等于生成接口可用。已知远端厂商的 chat 都需要凭据，
+// 没有凭据还照发自动验证只会换来成片 401 与无意义 unknown；本地/自建与显式
+// authMode=none 才允许匿名验证。
+export function canValidateWithoutKey(profile: EndpointProfile, provider?: ProviderPreset): boolean {
+  if (profile.authMode === 'none') {
+    return true;
+  }
+  if (provider) {
+    return false;
+  }
+  try {
+    const host = new URL(profile.baseURL).hostname.toLowerCase();
+    return host.endsWith('.localhost') || PRIVATE_HOST.some((pattern) => pattern.test(host));
+  } catch {
+    return false;
+  }
 }

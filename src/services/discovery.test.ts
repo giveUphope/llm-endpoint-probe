@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DiscoveredModel, ProxyResponse } from '../domain/types';
 import { PROBE_FAKE_MODEL_ID } from '../adapters/shared';
 import { emptyCapabilities } from '../domain/capabilities';
-import { aggregateProbe, buildNameCheck, classifyUpstreamError, describeHttpFailure, evaluateValidation, interpretExplicitRejection, mergeValidationEvidence, modelGenerationInterfaces, modelInterfaces, summarizeResponse } from './discovery';
+import { aggregateProbe, buildNameCheck, classifyUpstreamError, describeHttpFailure, evaluateValidation, interpretExplicitRejection, mergeValidationEvidence, modelGenerationInterfaces, modelInterfaces, planAutoValidation, summarizeResponse } from './discovery';
 import { createProfile } from '../lib/profile';
 
 function discoveredModel(overrides: Partial<DiscoveredModel> = {}): DiscoveredModel {
@@ -280,6 +280,40 @@ describe('validation rejection interpretation', () => {
     const result = interpretExplicitRejection('supportsTemperature', 'HTTP 400；服务端：bad temperature');
     expect(result).toMatchObject({ value: 'unsupported', confidence: 'medium' });
     expect(result.detail).toBe('服务端明确拒绝参数：HTTP 400；服务端：bad temperature');
+  });
+});
+
+describe('auto validation plan', () => {
+  const many = ['a', 'b', 'c', 'd'].map((id) => discoveredModel({ id }));
+  const plan = (overrides: Partial<Parameters<typeof planAutoValidation>[0]> = {}) => planAutoValidation({
+    models: many, hasKey: true, providerRequiresKey: true, authenticationFailed: false, ...overrides,
+  });
+
+  it('validates every discovered model without any cap', () => {
+    const result = plan();
+    expect(result.targets.map((model) => model.id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(result.blocked).toEqual([]);
+    expect(result.reason).toBeUndefined();
+  });
+
+  it('skips every probe without a usable credential or after auth already failed', () => {
+    const keyless = plan({ hasKey: false });
+    expect(keyless.targets).toEqual([]);
+    expect(keyless.reason).toBe('keyless');
+
+    const authFailed = plan({ authenticationFailed: true });
+    expect(authFailed.reason).toBe('auth-failed');
+    expect(authFailed.blocked).toHaveLength(4);
+
+    // 匿名可用端点（本地 / authMode=none）没有凭据也照样验证
+    expect(plan({ hasKey: false, providerRequiresKey: false }).targets).toHaveLength(4);
+  });
+
+  it('does not re-validate models that are already validated', () => {
+    const models = ['a', 'b'].map((id) => discoveredModel({ id }));
+    models[0].status = 'validated';
+    const result = planAutoValidation({ models, hasKey: true, providerRequiresKey: true, authenticationFailed: false });
+    expect(result.targets.map((model) => model.id)).toEqual(['b']);
   });
 });
 

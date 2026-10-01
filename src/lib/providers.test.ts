@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createProfile } from './profile';
-import { detectProvider, resolveProviderProfile } from './providers';
+import { canValidateWithoutKey, detectProvider, resolveProviderProfile } from './providers';
 
 describe('provider presets', () => {
   it('recognizes OpenRouter URLs with or without a trailing slash', () => {
@@ -46,5 +46,21 @@ describe('provider presets', () => {
     ['https://gateway.example.com/custom/v1/chat/completions', 'https://gateway.example.com/custom/v1', 'openai-chat', 'bearer', 'gateway.example.com/custom/v1'],
   ])('resolves full request URL %s', (input, baseURL, protocol, authMode, name) => {
     expect(resolveProviderProfile({ ...createProfile(), baseURL: input }).profile).toMatchObject({ baseURL, protocol, authMode, name });
+  });
+
+  it('marks OpenRouter as having a key-free catalog but key-gated generation', () => {
+    const preset = detectProvider('https://openrouter.ai/api/v1');
+    expect(preset?.id).toBe('openrouter');
+    expect(preset?.keylessCatalog).toBe(true);
+    expect(canValidateWithoutKey({ ...createProfile(), baseURL: 'https://openrouter.ai/api/v1' }, preset)).toBe(false);
+    // 目录免密可读不等于能验证：没有凭据时自动验证只会换来成片 401
+    expect(canValidateWithoutKey({ ...createProfile(), baseURL: 'https://openrouter.ai/api/v1', authMode: 'none' }, preset)).toBe(true);
+  });
+
+  it('allows anonymous validation only for local or explicitly key-free endpoints', () => {
+    expect(canValidateWithoutKey({ ...createProfile(), baseURL: 'http://192.168.1.20:8000/v1' })).toBe(true);
+    expect(canValidateWithoutKey({ ...createProfile(), baseURL: 'http://localhost:11434' })).toBe(true);
+    expect(canValidateWithoutKey({ ...createProfile(), baseURL: 'https://gateway.example.com/v1' })).toBe(false);
+    expect(resolveProviderProfile({ ...createProfile(), baseURL: 'http://localhost:11434/api/chat' }).profile.authMode).toBe('none');
   });
 });

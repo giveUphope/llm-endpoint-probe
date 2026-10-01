@@ -15,7 +15,7 @@ import {
   sameModelName,
   type GenerationShape,
 } from '../adapters/shared';
-import { evidence, modelConfidence } from '../domain/capabilities';
+import { capabilityKeys, evidence, modelConfidence } from '../domain/capabilities';
 import type {
   AdapterRequest,
   CapabilityKey,
@@ -35,7 +35,7 @@ import type {
 } from '../domain/types';
 import { mergeHeaders, normalizeApiKey, redactHeaders, redactText, sanitizeData } from '../lib/security';
 import { buildPreview } from '../lib/preview';
-import { detectProvider } from '../lib/providers';
+import { canValidateWithoutKey, detectProvider } from '../lib/providers';
 import { uid } from '../lib/profile';
 import { authorizeEndpoint, ProbeError, proxyRequest } from './proxy';
 
@@ -652,10 +652,61 @@ export async function discover(
     updateStep(run, 'models', {
       status: 'success', summary: `发现 ${models.length} 个模型`, completedAt: new Date().toISOString(),
     });
-    updateStep(run, 'capabilities', {
-      status: 'success', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
-      summary: '已归一化声明与推测证据；主动验证仍为独立操作',
+    // 探测即验证：默认自动执行全部能力与名称真实性校验，覆盖所有发现的模型（不设上限）。
+    // 模型之间顺序执行、单模型内部并发，可随时取消；这里只判断“能不能验证”
+    const plan = planAutoValidation({
+      models: run.models,
+      hasKey: Boolean(normalizeApiKey(profile.apiKey, profile.authMode)),
+      providerRequiresKey: Boolean(provider) && !canValidateWithoutKey(profile, provider),
+      authenticationFailed,
     });
+    if (plan.reason) {
+      updateStep(run, 'capabilities', {
+        status: 'warning', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+        summary: plan.reason === 'auth-failed'
+          ? `认证未通过：跳过 ${plan.blocked.length} 个模型的主动验证，能力结论仅为目录声明`
+          : `免密目录可读但生成接口需要凭据：跳过 ${plan.blocked.length} 个模型的主动验证，能力结论仅为目录声明`,
+      });
+    } else {
+      updateStep(run, 'capabilities', {
+        status: 'running', startedAt: new Date().toISOString(),
+        summary: `自动验证 0/${plan.targets.length} 个模型`,
+      });
+      let validatedCount = 0;
+      let validationFailures = 0;
+      for (let index = 0; index < plan.targets.length; index += 1) {
+        const target = plan.targets[index];
+        updateStep(run, 'capabilities', { summary: `自动验证 ${index + 1}/${plan.targets.length}：${target.id}` });
+        onUpdate(structuredClone(run));
+        const validated = await validateModel(
+          profile,
+          target,
+          capabilityKeys,
+          signal,
+          (request) => {
+            if (run.requests.some((item) => item.id === request.id)) return;
+            run.requests.push(request);
+            onUpdate(structuredClone(run));
+          },
+          { profile, endpointToken },
+        ).catch((error: unknown) => {
+          if (error instanceof ProbeError && error.type === 'cancelled') throw error;
+          validationFailures += 1;
+          return undefined;
+        });
+        if (!validated) continue;
+        run.models = run.models.map((model) => (model.id === validated.id ? validated : model));
+        validatedCount += 1;
+        onUpdate(structuredClone(run));
+      }
+      updateStep(run, 'capabilities', {
+        status: validationFailures ? 'warning' : 'success',
+        completedAt: new Date().toISOString(),
+        summary: validationFailures
+          ? `${validatedCount}/${plan.targets.length} 个模型验证完成，${validationFailures} 个中断`
+          : `已自动验证 ${validatedCount} 个模型的全部能力（含名称真实性校验）`,
+      });
+    }
     run.status = authenticationFailed ? 'partial' : 'success';
     run.completedAt = new Date().toISOString();
   } catch (error) {
@@ -727,19 +778,49 @@ async function probeOnce(
   }
 }
 
+// 自动验证的前置条件：验证默认自动执行并覆盖全部发现的模型，不设数量上限。
+// 这里只处理“能不能验证”：认证已失败、或需要凭据的远端厂商没有凭据时整批跳过，
+// 避免成片 401 换回一堆无意义 unknown —— 那类模型的跳过后仍可由用户显式继续。
+export interface AutoValidationPlan {
+  targets: DiscoveredModel[];
+  blocked: DiscoveredModel[];
+  reason?: 'keyless' | 'auth-failed';
+}
+
+export function planAutoValidation(input: {
+  models: DiscoveredModel[];
+  hasKey: boolean;
+  providerRequiresKey: boolean;
+  authenticationFailed: boolean;
+}): AutoValidationPlan {
+  const pending = input.models.filter((model) => model.status !== 'validated');
+  if (input.authenticationFailed) return { targets: [], blocked: pending, reason: 'auth-failed' };
+  if (!input.hasKey && input.providerRequiresKey) return { targets: [], blocked: pending, reason: 'keyless' };
+  return { targets: pending, blocked: [] };
+}
+
 export async function validateModel(
   profile: EndpointProfile,
   model: DiscoveredModel,
   capabilities: CapabilityKey[],
   signal: AbortSignal,
   onRequest?: (request: RequestRecord) => void,
+  // 探测流程已经授权过端点时复用同一 token，避免每个模型都重新申请一次会话
+  preAuthorized?: { profile: EndpointProfile; endpointToken: string },
 ): Promise<DiscoveredModel> {
-  if (!profile.allowValidation) throw new ProbeError('请先启用主动验证', 'blocked');
   const next = structuredClone(model);
   next.status = 'validating';
-  const authorization = await authorizeEndpoint(profile, signal);
-  profile = authorization.profile;
-  const endpointToken = authorization.endpointToken;
+  let workingProfile = profile;
+  let endpointToken: string;
+  if (preAuthorized) {
+    workingProfile = preAuthorized.profile;
+    endpointToken = preAuthorized.endpointToken;
+  } else {
+    const authorization = await authorizeEndpoint(profile, signal);
+    workingProfile = authorization.profile;
+    endpointToken = authorization.endpointToken;
+  }
+  profile = workingProfile;
   const chatInterfaces = modelInterfaces(model);
   const generationInterfaces = modelGenerationInterfaces(model);
   const run = createRun(profile.id);

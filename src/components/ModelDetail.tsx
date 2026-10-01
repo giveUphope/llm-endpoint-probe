@@ -14,12 +14,11 @@ interface Props {
   requests: RequestRecord[];
   onClose: () => void;
   onValidate: () => void;
-  canValidate: boolean;
   reference: ReferenceState;
   onRetryReference: () => void;
 }
 
-export function ModelDetail({ model, requests, onClose, onValidate, canValidate, reference, onRetryReference }: Props) {
+export function ModelDetail({ model, requests, onClose, onValidate, reference, onRetryReference }: Props) {
   const [rawOpen, setRawOpen] = useState(false);
   const [format, setFormat] = useState<'json' | 'yaml'>('json');
   const copy = () => navigator.clipboard.writeText(modelSnippet(model, format));
@@ -31,8 +30,8 @@ export function ModelDetail({ model, requests, onClose, onValidate, canValidate,
     <aside className="model-detail">
       <div className="detail-heading"><div><span className="eyebrow">模型详情</span><h2>{model.displayName}</h2><code>{model.id}</code></div><button className="icon-button" title="关闭详情" onClick={onClose}><X size={17} /></button></div>
       <div className="detail-meta"><div><span>协议</span><strong>{model.protocol}</strong></div><div><span>置信度</span><strong>{model.confidence}</strong></div><div><span>上下文</span><strong>{model.contextWindow?.toLocaleString() ?? '未知'}</strong></div><div><span>最大输出</span><strong>{model.maxOutputTokens?.toLocaleString() ?? '未知'}</strong></div>{model.vendor && <div><span>上游厂商</span><strong>{model.vendor}</strong></div>}<div><span>声明接口</span><strong>{model.endpointTypes?.length ? model.endpointTypes.map(interfaceLabel).join(' / ') : '未声明'}</strong></div></div>
-      <button className="validate-button" disabled={!canValidate || model.status === 'validating'} onClick={onValidate}><RefreshCw className={model.status === 'validating' ? 'spin' : ''} size={15} />{canValidate ? '选择能力并重新验证' : '端点未允许主动验证'}</button>
-      {canValidate && <small className="name-check-hint">验证会额外发送虚假模型名请求，比对端点回显以排查名称真实性（多接口模型将逐接口执行）。</small>}
+      <button className="validate-button" disabled={model.status === 'validating'} onClick={onValidate}><RefreshCw className={model.status === 'validating' ? 'spin' : ''} size={15} />重新验证能力</button>
+      <small className="name-check-hint">探测已自动验证全部能力；这里可重新验证。验证会再次发送最小请求，包括虚假模型名请求，用于比对端点回显以排查名称真实性（多接口模型将逐接口执行）。</small>
       {model.nameCheck && <section className="detail-section">
         <div className="subsection-heading"><strong>模型名真实性</strong><span>回显比对 · 未知名探测</span></div>
         <div className="name-check">

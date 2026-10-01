@@ -34,7 +34,6 @@ export interface EndpointProfile {
   headers: KeyValue[];
   queryParams: KeyValue[];
   timeoutMs: number;
-  allowValidation: boolean;
   allowLocalNetwork: boolean;
   createdAt: string;
   updatedAt: string;

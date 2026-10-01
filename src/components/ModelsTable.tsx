@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, AudioLines, Box, FileText, Image, Search, Type, Video } from 'lucide-react';
+import { ArrowDown, ArrowUp, AudioLines, Box, FileText, FlaskConical, Image, Search, Type, Video } from 'lucide-react';
 import type { DiscoveredModel, InputModality } from '../domain/types';
 import { CapabilityBadge } from './CapabilityBadge';
 
@@ -21,6 +21,13 @@ interface Props {
   onStatusFilter: (value: string) => void;
   onSort: (key: SortKey) => void;
   onSelect: (model: DiscoveredModel) => void;
+  /** 仅开发环境注入：载入演示模型，用于在没有真实端点与密钥时目测展示层 */
+  onLoadSample?: () => void;
+  /** 本轮未自动验证的模型数（免密跳过、认证失败或验证中断） */
+  remainingCount?: number;
+  onValidateRemaining?: () => void;
+  /** 端点缺少可用凭据：显式继续验证也只会得到 401，按钮禁用并说明原因 */
+  remainingBlocked?: boolean;
 }
 
 const modalityIcons: Record<InputModality, typeof Type> = { text: Type, image: Image, audio: AudioLines, video: Video, pdf: FileText };
@@ -48,6 +55,9 @@ export function ModelsTable(props: Props) {
         <select aria-label="探测结果筛选" value={props.statusFilter} onChange={(event) => props.onStatusFilter(event.target.value)}>
           <option value="">全部结果</option><option value="discovered">已发现</option><option value="validated">已验证</option><option value="partial">部分完成</option><option value="error">错误</option>
         </select>
+        {props.onLoadSample && <button className="section-toggle" onClick={props.onLoadSample} title="载入演示模型，不发送任何请求"><FlaskConical size={14} />载入示例模型</button>}
+        {props.onValidateRemaining && <button className="section-toggle" onClick={props.onValidateRemaining} title={`为剩余 ${props.remainingCount ?? 0} 个模型补做能力验证`}>继续验证 {props.remainingCount} 个未验证模型</button>}
+        {props.remainingBlocked && <button className="section-toggle" disabled title="端点没有可用凭据，生成接口不可用：主动验证只会得到 401，能力结论保持目录声明">继续验证 {props.remainingCount} 个未验证模型</button>}
         <span className="result-count">{props.models.length} 个模型</span>
       </div>
       <div className="table-scroll">
