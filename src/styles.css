@@ -188,6 +188,13 @@ code, pre { font-family: "Cascadia Code", Consolas, monospace; }
 .subsection-heading > span { color: var(--muted); font-size: var(--fs-2xs); }
 .ref-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; padding: 8px 9px; border: 1px dashed var(--line); border-radius: 4px; color: var(--muted); font-size: var(--fs-2xs); line-height: 1.5; }
 .ref-note.warn { border-style: solid; border-color: #ecd092; color: #6f510f; background: #fff9e9; }
+/* 参照源切换：两个只读目录互斥展示，同一时刻只有一份声明参与比对 */
+.ref-sources { display: grid; gap: 2px; }
+.ref-source-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: 9px; }
+.ref-source-bar .ref-note { flex: 1 1 180px; margin-top: 0; padding: 0; border: none; }
+.ref-source-switch { display: inline-flex; padding: 2px; border: 1px solid var(--line); border-radius: 4px; background: #f2f5f6; }
+.ref-source-switch button { padding: 4px 10px; border: 0; border-radius: 3px; background: transparent; color: var(--muted); font-size: var(--fs-2xs); cursor: pointer; }
+.ref-source-switch button.active { background: white; color: #22333b; font-weight: 600; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.12); }
 .ref-table { display: grid; gap: 1px; margin-top: 9px; border: 1px solid var(--line); background: var(--line); }
 .ref-row { display: grid; grid-template-columns: minmax(56px, 1.1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(48px, 0.8fr); gap: 8px; align-items: baseline; padding: 6px 10px; background: white; font-size: var(--fs-2xs); }
 .ref-row.ref-head { color: var(--muted); background: #f7f9fa; }

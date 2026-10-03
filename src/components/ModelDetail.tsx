@@ -16,9 +16,12 @@ interface Props {
   onValidate: () => void;
   reference: ReferenceState;
   onRetryReference: () => void;
+  /** 可选的第二只读目录（models.dev）：未提供时切换按钮会退化为“暂未加载”状态，不影响主参照 */
+  modelsDev?: ReferenceState;
+  onLoadModelsDev?: () => void;
 }
 
-export function ModelDetail({ model, requests, onClose, onValidate, reference, onRetryReference }: Props) {
+export function ModelDetail({ model, requests, onClose, onValidate, reference, onRetryReference, modelsDev, onLoadModelsDev }: Props) {
   const [rawOpen, setRawOpen] = useState(false);
   const [format, setFormat] = useState<'json' | 'yaml'>('json');
   const copy = () => navigator.clipboard.writeText(modelSnippet(model, format));
@@ -74,7 +77,7 @@ export function ModelDetail({ model, requests, onClose, onValidate, reference, o
         <div className="capability-matrix">{capabilityKeys.map((key) => { const status = model.capabilities[key]; return <div className="capability-row" key={key}><span>{capabilityLabels[key]}</span><CapabilityBadge status={status} /><div className="evidence-list">{status.evidence.map((item, index) => <small key={`${item.timestamp}-${index}`}><b>{item.source}</b> · {item.confidence} · {item.detail}</small>)}{key === 'supportsReasoning' && model.reasoningLevels.length > 0 && <small><b>levels</b> · {model.reasoningLevels.join(', ')}</small>}</div></div>; })}</div>
       </section>
       <section className="detail-section"><div className="subsection-heading"><strong>OpenRouter 参照比对</strong><span>第三方目录只读比对</span></div>
-        <ReferenceCompare model={model} reference={reference} onRetry={onRetryReference} />
+        <ReferenceCompare model={model} reference={reference} onRetry={onRetryReference} modelsDev={modelsDev} onLoadModelsDev={onLoadModelsDev} />
       </section>
       <section className="detail-section"><div className="subsection-heading"><strong>最近请求</strong><span>已自动脱敏</span></div>{lastRequest ? <div className="last-request"><div><span className={`method method-${lastRequest.method.toLowerCase()}`}>{lastRequest.method}</span><code>{lastRequest.finalURL || lastRequest.url}</code><small>{lastRequest.status ?? '—'} · {lastRequest.durationMs ?? '—'}ms · {lastRequest.responseBytes != null ? `${Math.ceil(lastRequest.responseBytes / 1024)} KiB` : '—'}</small></div>{lastRequest.errorMessage ? <pre>{lastRequest.errorMessage}</pre> : <ResponsePreview value={lastRequest.responsePreview} />}</div> : <div className="log-empty compact">暂无请求记录。</div>}</section>
       <section className="detail-section"><button className="section-toggle" onClick={() => setRawOpen(!rawOpen)}><Braces size={15} />原始元数据 <span>{rawOpen ? '收起' : '展开'}</span></button>{rawOpen && <pre className="raw-viewer">{JSON.stringify(model.rawMetadata, null, 2)}</pre>}</section>

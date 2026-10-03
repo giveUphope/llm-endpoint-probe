@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { emptyCapabilities } from '../domain/capabilities';
 import type { CapabilityKey, CapabilityStatus, CapabilityValue, DiscoveredModel, ReferenceCatalog, ReferenceModelEntry } from '../domain/types';
 import { createProfile } from '../lib/profile';
+import modelsDevSample from './reference.modelsdev.sample.json';
 import {
   compareReference,
   fetchReferenceCatalog,
@@ -380,5 +381,92 @@ describe('reference catalog transport', () => {
     const catalog = await fetchReferenceCatalog();
     expect(catalog).toMatchObject({ stale: true, staleReason: '参照目录上游返回 HTTP 500', fetchedAt: '2026-09-30T00:00:00.000Z' });
     expect(catalog.models.map((entry) => entry.id)).toEqual(['openai/gpt-4o']);
+  });
+});
+
+describe('models.dev 参照源', () => {
+  // 夹具从真实 api.json 按判据抽取（全 true / 全 false / budget_tokens / 跨 provider 分歧），
+  // 结构与上游一致：顶层是 provider id，其下挂各自的 models
+  const envelope = { url: 'https://models.dev/api.json', fetchedAt: '2026-09-30T00:00:00.000Z', data: modelsDevSample };
+  const catalog = parseReferenceCatalog(envelope, 'https://models.dev/api.json', '2026-09-30T00:00:00.000Z', 'modelsdev');
+  const rowOf = (comparison: ReturnType<typeof compareReference>, key: CapabilityKey) => comparison.rows.find((row) => row.key === key)!;
+
+  it('flattens provider-keyed listings into vendor-qualified entries', () => {
+    expect(catalog.source).toBe('modelsdev');
+    const entry = catalog.models.find((item) => item.id === 'openai/gpt-5.1');
+    expect(entry).toMatchObject({
+      name: 'GPT-5.1',
+      contextWindow: 400000,
+      inputModalities: ['text', 'image'],
+      supportedParameters: ['tools', 'temperature', 'structured_outputs', 'reasoning'],
+      reasoningLevels: ['none', 'low', 'medium', 'high'],
+    });
+  });
+
+  it('accepts both the proxied envelope and a bare catalog object', () => {
+    // 上游信封形状曾经和 mock 不一致过，这里两种都必须能解析
+    expect(parseReferenceCatalog(modelsDevSample, 'u', 't', 'modelsdev').models).toHaveLength(catalog.models.length);
+  });
+
+  it('records an all-false listing as a declaration, not as silence', () => {
+    expect(catalog.models.find((item) => item.id === 'openai/chatgpt-image-latest')?.supportedParameters).toEqual([]);
+  });
+
+  it('refuses to verdict on capabilities the catalog has no field for', () => {
+    // 夹具里每条 models.dev 条目都至少声明了一个布尔字段：若按“声明了别的参数所以本项不支持”推断，
+    // stop / seed / top_p / json 模式会被整片误判成“参照声明不支持”
+    const target = model({ id: 'gpt-5.1' });
+    const comparison = compareReference(target, matchReference(target, catalog)!);
+    expect(rowOf(comparison, 'supportsTools').reference).toBe('supported');
+    expect(rowOf(comparison, 'supportsTemperature').reference).toBe('supported');
+    expect(rowOf(comparison, 'supportsStructuredOutput').reference).toBe('supported');
+    for (const key of ['supportsStop', 'supportsSeed', 'supportsTopP', 'supportsJsonMode', 'supportsStreaming', 'supportsPromptCache'] as CapabilityKey[]) {
+      expect(rowOf(comparison, key).reference).toBe('unknown');
+      expect(rowOf(comparison, key).conflict).toBe(false);
+    }
+  });
+
+  it('still reports a real negative declaration as unsupported', () => {
+    const target = model({
+      id: 'chatgpt-image-latest',
+      capabilities: {
+        ...emptyCapabilities(),
+        supportsTools: { value: 'supported', evidence: [{ source: 'validated', confidence: 'high', detail: '实测到 tool_calls', timestamp: '2026-09-30T00:00:00.000Z' }] },
+      },
+    });
+    const row = rowOf(compareReference(target, matchReference(target, catalog)!), 'supportsTools');
+    expect(row.reference).toBe('unsupported');
+    expect(row.conflict).toBe(true);
+    expect(row.severity).toBe('validated-over-declaration');
+  });
+
+  it('unions divergent provider listings instead of picking a representative', () => {
+    // 夹具里的 gpt-5-mini 在 6 个 provider 下有 6 种声明组合：
+    // temperature 只有 2 家写 true、tool_call 六家全写 true
+    const target = model({ id: 'gpt-5-mini' });
+    const match = matchReference(target, catalog)!;
+    expect(match.source).toBe('modelsdev');
+    expect(match.ambiguous).toBe(false);
+    expect(match.providerCount).toBe(6);
+    const comparison = compareReference(target, match);
+    expect(comparison.variants).toHaveLength(6);
+    expect(rowOf(comparison, 'supportsTemperature')).toMatchObject({ reference: 'supported', partial: true, supportingListings: 2 });
+    expect(rowOf(comparison, 'supportsTools')).toMatchObject({ reference: 'supported', partial: false, supportingListings: 6 });
+    // 并集只用于“保守地不下假冲突”，绝不反过来把目录缺失当成不支持
+    expect(rowOf(comparison, 'supportsStop').reference).toBe('unknown');
+  });
+
+  it('fetches the second catalog through the same guarded route', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(envelope), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const loaded = await fetchReferenceCatalog(undefined, 'modelsdev');
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/reference/models?source=modelsdev');
+    expect(loaded.source).toBe('modelsdev');
+    expect(loaded.models.length).toBe(catalog.models.length);
+  });
+
+  it('keeps the default route free of a query string', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ url: 'u', fetchedAt: '2026-09-30T00:00:00.000Z', data: [{ id: 'openai/gpt-4o' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    await fetchReferenceCatalog();
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/reference/models');
   });
 });

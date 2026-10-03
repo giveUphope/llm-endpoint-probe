@@ -263,8 +263,10 @@ export interface ProxyResponse {
   finalURL?: string;
 }
 
-// OpenRouter 公开模型目录的只读参照条目：仅用于与端点发现结果交叉比对展示，
+// 外部模型目录的只读参照条目：仅用于与端点发现结果交叉比对展示，
 // 不参与探测请求、端点授权会话与任何配置回写
+export type ReferenceSource = 'openrouter' | 'modelsdev';
+
 export interface ReferenceModelEntry {
   id: string;
   name?: string;
@@ -283,7 +285,7 @@ export interface ReferenceModelEntry {
 }
 
 export interface ReferenceCatalog {
-  source: 'openrouter';
+  source: ReferenceSource;
   url: string;
   fetchedAt: string;
   /** 上游本次不可用，代理回退到过期快照：仅作降级说明，不改变任何比对语义 */

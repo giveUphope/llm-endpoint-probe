@@ -1,5 +1,5 @@
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { emptyCapabilities } from '../domain/capabilities';
 import type { DiscoveredModel, ReferenceCatalog, RequestRecord } from '../domain/types';
 import { PROBE_FAKE_MODEL_ID } from '../adapters/shared';
@@ -324,5 +324,78 @@ describe('ModelDetail OpenRouter reference comparison', () => {
   it('surfaces a degraded reference state without touching probe results', () => {
     renderDetail(model(), { status: 'error', message: '参照目录获取失败：本地受控代理不可达' });
     expect(screen.getByText('参照目录不可用：参照目录获取失败：本地受控代理不可达。参照不可用不会改变端点探测结论。')).toBeInTheDocument();
+  });
+});
+
+describe('参照源切换', () => {
+  const devCatalog: ReferenceState = {
+    status: 'ready',
+    catalog: {
+      source: 'modelsdev',
+      url: 'https://models.dev/api.json',
+      fetchedAt: '2026-09-30T00:00:00.000Z',
+      models: [{ id: 'openai/gpt-5-mini', name: 'GPT-5 mini', inputModalities: ['text'], supportedParameters: ['tools', 'reasoning'], reasoningLevels: [] }],
+    },
+  };
+
+  function renderWithSources(modelsDev: ReferenceState | undefined, onLoadModelsDev: () => void) {
+    render(<ModelDetail
+      model={model({ id: 'gpt-5-mini' })}
+      requests={[]}
+      onClose={() => undefined}
+      onValidate={() => undefined}
+      reference={readyCatalog([{ id: 'openai/gpt-5-mini', inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] }])}
+      onRetryReference={() => undefined}
+      modelsDev={modelsDev}
+      onLoadModelsDev={onLoadModelsDev}
+    />);
+  }
+
+  it('stays on OpenRouter and only fetches the second catalog when switched to', () => {
+    const onLoadModelsDev = vi.fn();
+    renderWithSources(undefined, onLoadModelsDev);
+    expect(screen.getByText(/以下为 OpenRouter 公开目录的第三方声明/)).toBeInTheDocument();
+    expect(onLoadModelsDev).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'models.dev' }));
+    expect(onLoadModelsDev).toHaveBeenCalledTimes(1);
+    // 尚未加载完时不得继续展示 OpenRouter 的行，避免把两份目录混成一份
+    expect(screen.queryByText(/以下为 OpenRouter 公开目录的第三方声明/)).not.toBeInTheDocument();
+    expect(screen.getByText('正在通过本地受控代理获取参照目录…')).toBeInTheDocument();
+  });
+
+  it('shows the second catalog with its own coverage limits', () => {
+    renderWithSources(devCatalog, vi.fn());
+    fireEvent.click(screen.getByRole('button', { name: 'models.dev' }));
+    expect(screen.getByText(/以下为 models\.dev 公开目录的第三方声明/)).toBeInTheDocument();
+    expect(screen.getByText(/没有 top_p \/ seed \/ stop \/ response_format \/ stream 字段/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'OpenRouter' }));
+    expect(screen.getByText(/以下为 OpenRouter 公开目录的第三方声明/)).toBeInTheDocument();
+  });
+
+  it('never reports a tier merge for a catalog that has no tiers', () => {
+    // models.dev 的同名条目是几十份 provider 上架声明，标成“档位合并”会误导
+    render(<ModelDetail
+      model={model({ id: 'solo-model' })}
+      requests={[]}
+      onClose={() => undefined}
+      onValidate={() => undefined}
+      reference={readyCatalog([])}
+      onRetryReference={() => undefined}
+      modelsDev={{
+        status: 'ready',
+        catalog: {
+          source: 'modelsdev', url: 'u', fetchedAt: '2026-09-30T00:00:00.000Z',
+          models: [
+            { id: 'a/solo-model', inputModalities: ['text'], supportedParameters: ['tools'], reasoningLevels: [] },
+            { id: 'b/solo-model', inputModalities: ['text'], supportedParameters: ['temperature'], reasoningLevels: [] },
+          ],
+        },
+      }}
+      onLoadModelsDev={() => undefined}
+    />);
+    fireEvent.click(screen.getByRole('button', { name: 'models.dev' }));
+    expect(screen.queryByText('档位合并')).not.toBeInTheDocument();
+    expect(screen.queryByText(/已合并 \d+ 个档位声明/)).not.toBeInTheDocument();
+    expect(screen.getByText(/同名条目来自 2 个 provider/)).toBeInTheDocument();
   });
 });

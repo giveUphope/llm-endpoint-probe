@@ -7,15 +7,27 @@ import type {
   InputModality,
   ReferenceCatalog,
   ReferenceModelEntry,
+  ReferenceSource,
 } from '../domain/types';
 import { ProbeError } from './proxy';
 
-// OpenRouter 公开模型目录的本地只读代理路由（固定白名单，服务端硬编码上游地址）
+// 参照目录的本地只读代理路由（服务端固定白名单，客户端永远不能指定上游地址）
 export const REFERENCE_ROUTE = '/api/reference/models';
 
-// OpenRouter 的 supported_parameters 不覆盖传输层与缓存标记：
-// 这两类能力在参照侧一律记为“参照未覆盖”(unknown)，不参与冲突判定
-const NOT_DECLARED_IN_REFERENCE: CapabilityKey[] = ['supportsStreaming', 'supportsPromptCache'];
+// 默认来源不带查询串，保持既有请求形状与测试契约不变
+export function referenceRoute(source: ReferenceSource = 'openrouter'): string {
+  return source === 'openrouter' ? REFERENCE_ROUTE : `${REFERENCE_ROUTE}?source=${source}`;
+}
+
+// 每个来源只能对它自己真有字段表达的能力下结论，其余一律记为“参照未覆盖”（unknown）。
+// 这一条是 provider 库不能替代实测的直接体现：
+// OpenRouter 的 supported_parameters 没有传输层与缓存标记；
+// models.dev 更窄，压根没有 top_p / seed / stop / response_format / stream / cache 字段。
+// 若不按来源限定范围，“目录声明了别的参数”就会被误推成“目录说本项不支持”。
+const NOT_DECLARED_BY_SOURCE: Record<ReferenceSource, CapabilityKey[]> = {
+  openrouter: ['supportsStreaming', 'supportsPromptCache'],
+  modelsdev: ['supportsTopP', 'supportsStop', 'supportsSeed', 'supportsJsonMode', 'supportsStreaming', 'supportsPromptCache'],
+};
 
 const INPUT_MODALITIES: InputModality[] = ['text', 'image', 'audio', 'video', 'pdf'];
 
@@ -146,23 +158,80 @@ function parseEntry(raw: unknown): ReferenceModelEntry | undefined {
 }
 
 // 把 OpenRouter 公开目录响应归一化为参照目录；无效条目跳过而不是中断整次比对
-export function parseReferenceCatalog(payload: unknown, url: string, fetchedAt: string): ReferenceCatalog {
+function parseOpenRouterCatalog(payload: unknown): ReferenceModelEntry[] {
   const root = record(payload);
   // 容忍两种信封：代理直接给出条目数组，或原样透传上游的 { data: [...] }
   const nested = record(root?.data);
   const entries = Array.isArray(root?.data) ? root.data : Array.isArray(nested?.data) ? nested.data : undefined;
   if (!entries) throw new ProbeError('参照目录响应缺少 data 数组', 'format');
-  const models = entries
-    .map(parseEntry)
-    .filter((entry): entry is ReferenceModelEntry => Boolean(entry));
-  if (!models.length) throw new ProbeError('参照目录中没有可用条目', 'format');
-  return { source: 'openrouter', url, fetchedAt, models };
+  return entries.map(parseEntry).filter((entry): entry is ReferenceModelEntry => Boolean(entry));
 }
 
-export async function fetchReferenceCatalog(signal?: AbortSignal): Promise<ReferenceCatalog> {
+// models.dev 的 api.json 以 provider id 为顶层键，其下再挂该 provider 上架的模型。
+// 同一型号会被多个 provider 重复收录（实测 8386 条里 4632 条重名）且声明可能互不一致，
+// 因此这里逐 provider 保留条目，交给索引层的分组逻辑去合并并标注分歧，
+// 绝不在解析阶段替它挑一个“代表值”
+function parseModelsDevCatalog(payload: unknown): ReferenceModelEntry[] {
+  // 容忍两种信封：代理把整个目录对象放在 data 里，也接受调用方直接传裸对象。
+  // OpenRouter 那边已经因为“mock 是扁平、真响应是嵌套”踩过一次，这里不再重演
+  const root = record(record(payload)?.data) ?? record(payload);
+  if (!root) throw new ProbeError('参照目录响应不是对象', 'format');
+  const models: ReferenceModelEntry[] = [];
+  for (const providerId of Object.keys(root)) {
+    const provider = record(root[providerId]);
+    const listings = record(provider?.models);
+    if (!listings) continue;
+    for (const modelId of Object.keys(listings)) {
+      const item = record(listings[modelId]);
+      if (!item) continue;
+      const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : modelId;
+      // 布尔字段只有显式为 true 才算“声明支持”，显式为 false 留在“声明过参数但没列这一项”里，
+      // 由按来源限定的比对得出“参照声明不支持”；字段缺失则整条不参与该能力判定
+      const supportedParameters = [
+        item.tool_call === true ? 'tools' : null,
+        item.temperature === true ? 'temperature' : null,
+        item.structured_output === true ? 'structured_outputs' : null,
+        item.reasoning === true ? 'reasoning' : null,
+      ].filter((parameter): parameter is string => Boolean(parameter));
+      const declaredSomething = ['tool_call', 'temperature', 'structured_output', 'reasoning']
+        .some((field) => typeof item[field] === 'boolean');
+      const modalities = record(item?.modalities);
+      const inputRaw = Array.isArray(modalities?.input) ? modalities.input : [];
+      const inputModalities = [...new Set(inputRaw
+        .map((value) => (value === 'file' ? 'pdf' : String(value)))
+        .filter((value): value is InputModality => INPUT_MODALITIES.includes(value as InputModality)))];
+      const reasoningLevels = [...new Set((Array.isArray(item?.reasoning_options) ? item.reasoning_options : [])
+        .flatMap((option) => {
+          const entry = record(option);
+          return entry?.type === 'effort' && Array.isArray(entry.values) ? entry.values.map((value) => String(value)) : [];
+        }))];
+      const name = typeof item?.name === 'string' && item.name.trim() ? item.name.trim() : undefined;
+      const contextWindow = positiveInt(record(item?.limit)?.context);
+      models.push({
+        id: `${providerId}/${id}`,
+        ...(name ? { name } : {}),
+        ...(contextWindow != null ? { contextWindow } : {}),
+        inputModalities: inputModalities.length ? inputModalities : ['text'],
+        // 目录对该型号一个参数都没说时保持 undefined（未覆盖），而不是空数组（说了且都不支持）
+        ...(declaredSomething ? { supportedParameters } : {}),
+        reasoningLevels,
+      });
+    }
+  }
+  if (!models.length) throw new ProbeError('参照目录中没有可用条目', 'format');
+  return models;
+}
+
+export function parseReferenceCatalog(payload: unknown, url: string, fetchedAt: string, source: ReferenceSource = 'openrouter'): ReferenceCatalog {
+  const models = source === 'modelsdev' ? parseModelsDevCatalog(payload) : parseOpenRouterCatalog(payload);
+  if (!models.length) throw new ProbeError('参照目录中没有可用条目', 'format');
+  return { source, url, fetchedAt, models };
+}
+
+export async function fetchReferenceCatalog(signal?: AbortSignal, source: ReferenceSource = 'openrouter'): Promise<ReferenceCatalog> {
   let response: Response;
   try {
-    response = await fetch(REFERENCE_ROUTE, {
+    response = await fetch(referenceRoute(source), {
       cache: 'no-store',
       credentials: 'same-origin',
       headers: { Accept: 'application/json' },
@@ -179,7 +248,7 @@ export async function fetchReferenceCatalog(signal?: AbortSignal): Promise<Refer
   if (typeof payload.url !== 'string' || typeof payload.fetchedAt !== 'string') {
     throw new ProbeError('参照目录响应缺少来源或时间戳', 'format');
   }
-  const catalog = parseReferenceCatalog(payload, payload.url, payload.fetchedAt);
+  const catalog = parseReferenceCatalog(payload, payload.url, payload.fetchedAt, source);
   // 上游不可用时代理会回退到过期快照：保留降级原因供展示层说明，参照仍然只是参照
   return payload.stale === true
     ? { ...catalog, stale: true, ...(typeof payload.staleReason === 'string' ? { staleReason: payload.staleReason } : {}) }
@@ -308,6 +377,8 @@ export interface ReferenceMatch {
   otherGroups: string[];
   /** 同名条目来自多少个不同 provider：能力声明按并集保守取值 */
   providerCount: number;
+  /** 命中的目录来源：决定参照能对哪些能力下结论（各目录字段覆盖面不同） */
+  source: ReferenceSource;
 }
 
 // 别名条目常常只带名字与跳转目标、不带能力声明：此时顺着 alias_target 把真实条目的声明并进来，
@@ -341,6 +412,7 @@ export function matchReference(model: DiscoveredModel, catalog: ReferenceCatalog
     entry: variants[0],
     variants,
     ambiguous: weakMultiHit,
+    source: catalog.source,
     otherGroups: weakMultiHit
       ? winners.slice(1).map((hit) => hit.group.entries[0]?.id ?? hit.group.label)
       : [...new Set(winners.map((hit) => hit.group.entries[0]?.id).filter((id): id is string => Boolean(id)))].slice(1),
@@ -413,8 +485,10 @@ function localSeverity(model: DiscoveredModel, key: CapabilityKey): ConflictSeve
 export function compareReference(model: DiscoveredModel, target: ReferenceModelEntry | ReferenceMatch): ReferenceComparison {
   const match: ReferenceMatch = 'entry' in target
     ? target
-    : { entry: target, variants: [target], ambiguous: false, otherGroups: [], providerCount: 1 };
-  const { entry, variants, ambiguous, otherGroups, providerCount } = match;
+    : { entry: target, variants: [target], ambiguous: false, otherGroups: [], providerCount: 1, source: 'openrouter' };
+  const { entry, variants, ambiguous, otherGroups, providerCount, source } = match;
+  // 该来源没有字段表达的能力一律不参与判定：既不能说支持，也不能说“声明了别的参数所以不支持”
+  const notDeclared = NOT_DECLARED_BY_SOURCE[source];
   // 任一同名条目声明支持即视为参照支持：档位与多 provider 上架是计费/渠道变体，
   // 窄档位不代表型号不支持；反过来“不支持”要求所有声明过参数的条目都没列出它
   const reasoningLevels = [...new Set(variants.flatMap((variant) => variant.reasoningLevels))];
@@ -426,7 +500,7 @@ export function compareReference(model: DiscoveredModel, target: ReferenceModelE
   const rows: ReferenceRow[] = (Object.keys(capabilityLabels) as CapabilityKey[]).map((key) => {
     const local = model.capabilities[key].value;
     const parameters = PARAMETER_CAPABILITIES[key];
-    const excluded = NOT_DECLARED_IN_REFERENCE.includes(key);
+    const excluded = notDeclared.includes(key);
     // Reasoning 除了参数名还看 supported_efforts：有些条目只列档位不列参数
     const declares = (variant: ReferenceModelEntry) => Array.isArray(variant.supportedParameters)
       || (key === 'supportsReasoning' && variant.reasoningLevels.length > 0);

@@ -55,6 +55,7 @@ export default function App() {
   const previousSidebarOpen = useRef(sidebarOpen);
   const referenceRequested = useRef(false);
   const [reference, setReference] = useState<ReferenceState>({ status: 'loading' });
+  const [modelsDev, setModelsDev] = useState<ReferenceState | undefined>(undefined);
 
   // OpenRouter 参照目录：只读拉取一次用于模型信息比对，失败时降级展示且不影响探测
   const loadReference = useCallback(async () => {
@@ -63,6 +64,16 @@ export default function App() {
       setReference({ status: 'ready', catalog: await fetchReferenceCatalog() });
     } catch (error) {
       setReference({ status: 'error', message: error instanceof Error ? error.message : '参照目录获取失败' });
+    }
+  }, []);
+
+  // 第二个只读目录：体积大（约 5 MB）且只在人工切换时才需要，因此不随探测自动拉取
+  const loadModelsDev = useCallback(async () => {
+    setModelsDev({ status: 'loading' });
+    try {
+      setModelsDev({ status: 'ready', catalog: await fetchReferenceCatalog(undefined, 'modelsdev') });
+    } catch (error) {
+      setModelsDev({ status: 'error', message: error instanceof Error ? error.message : '参照目录获取失败' });
     }
   }, []);
 
@@ -312,7 +323,7 @@ export default function App() {
         <div className="view-tabs"><button className={activeView === 'models' ? 'active' : ''} onClick={() => setActiveView('models')}><Braces size={15} />模型结果 <span>{run?.models.length ?? 0}</span></button><button className={activeView === 'logs' ? 'active' : ''} onClick={() => setActiveView('logs')}><ScrollText size={15} />探测与请求 <span>{run?.requests.length ?? 0}</span></button></div>
         {activeView === 'models' ? <ModelsTable models={filteredModels} selectedId={selectedId} search={search} capabilityFilter={capabilityFilter} confidenceFilter={confidenceFilter} protocolFilter={protocolFilter} statusFilter={statusFilter} sortKey={sortKey} sortDirection={sortDirection} onSearch={setSearch} onCapabilityFilter={setCapabilityFilter} onConfidenceFilter={setConfidenceFilter} onProtocolFilter={setProtocolFilter} onStatusFilter={setStatusFilter} onSort={handleSort} onSelect={(model) => setSelectedId(model.id)} onLoadSample={import.meta.env.DEV ? loadSampleModels : undefined} remainingCount={unvalidatedModels.length} remainingBlocked={remainingBlocked} onValidateRemaining={canValidateRemaining ? validateRemaining : undefined} /> : <ProbeLog run={run} />}
       </main>
-      {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} onValidate={() => setValidationModel(selectedModel)} reference={reference} onRetryReference={() => { referenceRequested.current = true; void loadReference(); }} />}
+      {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} onValidate={() => setValidationModel(selectedModel)} reference={reference} modelsDev={modelsDev} onLoadModelsDev={loadModelsDev} onRetryReference={() => { referenceRequested.current = true; void loadReference(); }} />}
     </div>
     {validationModel && <ValidationDialog model={validationModel} onClose={() => setValidationModel(undefined)} onStart={runValidation} />}
     {toast && <div className="toast"><Activity size={15} />{toast}</div>}

@@ -349,19 +349,25 @@ app.post('/api/proxy', async (req, res) => {
   }
 });
 
-// OpenRouter 公开模型目录的只读参照代理：固定白名单主机、免会话令牌、TTL 缓存。
-// 仅返回目录数据与来源/抓取时间，不接触任何端点配置、用户 Key 或授权会话。
-const REFERENCE_UPSTREAM = 'https://openrouter.ai/api/v1/models';
+// 只读参照目录代理：固定白名单上游、免会话令牌、TTL 缓存。
+// 新增参照来源只能在这里显式登记——路由永不接受来自客户端的 URL，避免变成通用转发器。
+// shape 决定响应如何装箱：'data-array' 只透传目录条目数组（客户端契约稳定），
+// 'raw' 原样透传整个 JSON 对象，由客户端按该来源自己的形状解析（目录语义只留在客户端一处）
+const REFERENCE_SOURCES = {
+  openrouter: { url: 'https://openrouter.ai/api/v1/models', timeoutMs: 10_000, shape: 'data-array' as const },
+  modelsdev: { url: 'https://models.dev/api.json', timeoutMs: 30_000, shape: 'raw' as const },
+};
+type ReferenceSourceId = keyof typeof REFERENCE_SOURCES;
+const DEFAULT_REFERENCE_SOURCE: ReferenceSourceId = 'openrouter';
 const REFERENCE_TTL_MS = 10 * 60 * 1000;
-const REFERENCE_TIMEOUT_MS = 10_000;
 const REFERENCE_MAX_BYTES = 8 * 1024 * 1024;
 // 参照接口对客户端的固定响应形状。stale/staleReason 只在抓取失败降级时由路由层
 // 浅拷贝后附加，缓存里的 payload 始终是该类型的干净实例，因此显式命名而非 unknown。
 type ReferenceResponseBody = { url: string; fetchedAt: string; data: unknown };
 interface ReferencePayload { fetchedAt: string; payload: ReferenceResponseBody }
-let referenceCache: ReferencePayload | undefined;
+const referenceCache = new Map<ReferenceSourceId, ReferencePayload>();
 // single-flight：并发请求共享同一次上游抓取，避免 TTL 过期瞬间多个详情面板同时打上游
-let referenceInFlight: Promise<ReferencePayload> | undefined;
+const referenceInFlight = new Map<ReferenceSourceId, Promise<ReferencePayload>>();
 
 // 流式读取并强制体积上限：与 /api/proxy 一致，上游不声明 content-length 时也不能无界缓冲
 async function readReferenceBody(response: Response): Promise<string> {
@@ -382,11 +388,12 @@ async function readReferenceBody(response: Response): Promise<string> {
   return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString('utf8');
 }
 
-async function loadReferencePayload(): Promise<ReferencePayload> {
+async function loadReferencePayload(source: ReferenceSourceId): Promise<ReferencePayload> {
+  const config = REFERENCE_SOURCES[source];
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REFERENCE_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
   try {
-    const upstream = await fetch(REFERENCE_UPSTREAM, { headers: { Accept: 'application/json' }, signal: controller.signal, redirect: 'error' });
+    const upstream = await fetch(config.url, { headers: { Accept: 'application/json' }, signal: controller.signal, redirect: 'error' });
     if (!upstream.ok) {
       // 上游错误页与目录无关，丢弃响应体而不是先全量读进内存
       await upstream.body?.cancel().catch(() => undefined);
@@ -399,30 +406,42 @@ async function loadReferencePayload(): Promise<ReferencePayload> {
     }
     const text = await readReferenceBody(upstream);
     const body: unknown = JSON.parse(text);
-    const entries = (body as { data?: unknown } | null)?.data;
-    if (!Array.isArray(entries)) throw new Error('参照目录响应结构不受支持');
     const fetchedAt = new Date().toISOString();
-    // 对外只暴露扁平的条目数组：客户端与测试契约都是 { url, fetchedAt, data: [...] }
-    return { fetchedAt, payload: { url: REFERENCE_UPSTREAM, fetchedAt, data: entries } };
+    if (config.shape === 'data-array') {
+      const entries = (body as { data?: unknown } | null)?.data;
+      if (!Array.isArray(entries)) throw new Error('参照目录响应结构不受支持');
+      // 对外只暴露扁平的条目数组：客户端与测试契约都是 { url, fetchedAt, data: [...] }
+      return { fetchedAt, payload: { url: config.url, fetchedAt, data: entries } };
+    }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('参照目录响应结构不受支持');
+    return { fetchedAt, payload: { url: config.url, fetchedAt, data: body } };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-app.get('/api/reference/models', async (_req, res) => {
+app.get('/api/reference/models', async (req, res) => {
   res.set('Cache-Control', 'no-store, max-age=0');
-  if (referenceCache && Date.now() - Date.parse(referenceCache.fetchedAt) < REFERENCE_TTL_MS) {
-    res.json(referenceCache.payload);
+  const requested = typeof req.query.source === 'string' ? req.query.source : DEFAULT_REFERENCE_SOURCE;
+  if (!(requested in REFERENCE_SOURCES)) {
+    res.status(400).json({ error: `未知的参照目录来源：${requested}`, errorType: 'invalid_url' });
+    return;
+  }
+  const source = requested as ReferenceSourceId;
+  const cached = referenceCache.get(source);
+  if (cached && Date.now() - Date.parse(cached.fetchedAt) < REFERENCE_TTL_MS) {
+    res.json(cached.payload);
     return;
   }
   try {
-    referenceInFlight = referenceInFlight ?? loadReferencePayload()
+    const pending = referenceInFlight.get(source) ?? loadReferencePayload(source)
       .then((result) => {
-        referenceCache = result;
+        referenceCache.set(source, result);
         return result;
       })
-      .finally(() => { referenceInFlight = undefined; });
-    const { payload } = await referenceInFlight;
+      .finally(() => { referenceInFlight.delete(source); });
+    referenceInFlight.set(source, pending);
+    const { payload } = await pending;
     // 成功路径返回的 payload 永远不带 stale：过期快照只在抓取失败时作为参照不可用的
     // 降级展示，不参与这里的正常命中；上游恢复后抓取会按 TTL 继续刷新缓存。
     res.json(payload);
@@ -432,9 +451,9 @@ app.get('/api/reference/models', async (_req, res) => {
     // 参照目录只是客户端做能力比对的外部基准，短暂取不到时展示旧快照比空白更有用；
     // 但降级不能伪装成新鲜数据，所以标记在浅拷贝副本上附加，缓存本身始终保持干净，
     // 否则下一次正常命中也会带上 stale，客户端无法判断上游是否已经恢复。
-    if (referenceCache) {
+    if (cached) {
       const staleBody: ReferenceResponseBody & { stale: true; staleReason: string } = {
-        ...referenceCache.payload,
+        ...cached.payload,
         stale: true,
         staleReason: errorText,
       };
