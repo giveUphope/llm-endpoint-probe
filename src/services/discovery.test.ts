@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { DiscoveredModel, ProxyResponse } from '../domain/types';
 import { PROBE_FAKE_MODEL_ID } from '../adapters/shared';
-import { emptyCapabilities } from '../domain/capabilities';
-import { aggregateProbe, buildNameCheck, classifyUpstreamError, describeHttpFailure, evaluateValidation, interpretExplicitRejection, mergeValidationEvidence, modelGenerationInterfaces, modelInterfaces, planAutoValidation, summarizeResponse } from './discovery';
+import { capabilityKeys, emptyCapabilities } from '../domain/capabilities';
+import { aggregateProbe, buildNameCheck, classifyUpstreamError, describeHttpFailure, estimateProbeRequests, evaluateValidation, interpretExplicitRejection, mergeValidationEvidence, modelGenerationInterfaces, modelInterfaces, planAutoValidation, summarizeResponse } from './discovery';
 import { createProfile } from '../lib/profile';
 
 function discoveredModel(overrides: Partial<DiscoveredModel> = {}): DiscoveredModel {
@@ -323,5 +323,26 @@ describe('validation evidence merging', () => {
     const merged = mergeValidationEvidence(previous, { value: 'supported', confidence: 'high', detail: 'observed' });
     expect(merged.evidence).toHaveLength(1);
     expect(merged.evidence[0]).toMatchObject({ source: 'validated', detail: 'observed' });
+  });
+});
+
+describe('probe request estimate', () => {
+  it('derives the count from the merged plan instead of the capability count', () => {
+    // 实测数字：合并探测在真实 llama.cpp 端点上发出 8 次 chat 请求（旧路径 14 次）
+    const estimate = estimateProbeRequests(discoveredModel(), capabilityKeys);
+    expect(estimate).toMatchObject({ chat: 8, generation: 0, merged: true });
+    // 少勾 5 个能力并不会等比例少发请求：采样组一次覆盖 4 个能力
+    expect(estimateProbeRequests(discoveredModel(), ['supportsTemperature', 'supportsTopP', 'supportsSeed', 'supportsStop', 'supportsStreaming']).chat).toBe(6);
+  });
+
+  it('adds two generation-interface requests per declared generation endpoint', () => {
+    expect(estimateProbeRequests(discoveredModel({ endpointTypes: ['image-generation', 'music'] }), capabilityKeys)).toMatchObject({ generation: 4, total: 12 });
+  });
+
+  it('falls back to counting per-capability requests when there is no plan', () => {
+    const estimate = estimateProbeRequests(discoveredModel({ protocol: 'openai-responses' }), capabilityKeys);
+    expect(estimate.merged).toBe(false);
+    // Responses 适配器没有合并方案：10 次能力请求 + 1 次虚假名请求
+    expect(estimate.chat).toBe(11);
   });
 });

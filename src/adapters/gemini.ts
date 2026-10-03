@@ -1,6 +1,6 @@
 import { evidence, modelConfidence } from '../domain/capabilities';
 import type { AdapterRequest, CapabilityKey, ProtocolAdapter } from '../domain/types';
-import { DEFAULT_STOP_SEQUENCE, normalizeModel, records, STOP_PROBE_WORD, TOOLS_PROBE_NAME } from './shared';
+import { normalizeModel, records, STOP_PROBE_PROMPT, STOP_PROBE_WORD, TOOLS_PROBE_NAME } from './shared';
 
 // 短小、必然产出、对温度敏感：temperature=0 倾向固定字，temperature=1 输出更发散，便于比较。
 const DUAL_PROBE_PROMPT = '请随机回复 3 个不同汉字，用空格分隔';
@@ -45,7 +45,7 @@ function generationBodies(capability: CapabilityKey): Record<string, unknown> | 
     generationConfig.responseMimeType = 'application/json';
   }
   if (capability === 'supportsReasoning') generationConfig.thinkingConfig = { thinkingBudget: 128 };
-  if (capability === 'supportsStop') { body.contents = [{ role: 'user', parts: [{ text: '依次输出：一，二，三，四，五，六，七，八，九，十' }] }]; generationConfig.maxOutputTokens = 120; generationConfig.stopSequences = [STOP_PROBE_WORD]; }
+  if (capability === 'supportsStop') { body.contents = [{ role: 'user', parts: [{ text: STOP_PROBE_PROMPT }] }]; generationConfig.maxOutputTokens = 120; generationConfig.stopSequences = [STOP_PROBE_WORD]; }
   return body;
 }
 

@@ -257,13 +257,15 @@ export function records(value: unknown): Record<string, unknown>[] {
 // 用于探测端点是否对未知模型名静默放行的虚假模型名
 export const PROBE_FAKE_MODEL_ID = 'zcode-probe-nonexistent-model';
 
-// 旧版停止词探测默认值（已弃用：会被自然包含于探测提示词中的词替换）
-export const DEFAULT_STOP_SEQUENCE = 'ZCODE_STOP_SEQUENCE_HERE';
-
-// 停止词探测：提示词会自然输出该词，再判断输出是否在它之后继续——
-// 出现停止词但未见后置标记 → stop 生效；出现后置标记 → stop 未生效；连停止词都未出现 → 无法确认
-export const STOP_PROBE_WORD = '五';
-export const STOP_PROBE_POST = '六';
+// 停止词探测：提示词要求模型连续输出中文数字，依次逼近停止词。
+// 三个词都不得出现在提示词里：推理模型常把提示词复述进思考文本，一旦提示词自带被检词，
+// 复述就会污染判定（旧提示词“一，二，三，四，五，六…”正是这种情况）。
+// 合规实现会把停止词本身从输出中剔除，因此不能用“输出包含停止词”作为生效依据：
+// 到达前置词并以 finish_reason=stop 结束 → 生效；输出跨过停止词 → 未生效；两者都不满足 → 无法确认
+export const STOP_PROBE_PROMPT = '请从壹开始按顺序连续输出中文数字（壹、贰、叁…），不要停顿，尽可能多输出，不要解释';
+export const STOP_PROBE_APPROACH = '捌'; // 停止词的前一项：出现它说明生成确实推进到了停止词附近
+export const STOP_PROBE_WORD = '玖';
+export const STOP_PROBE_POST = '拾';
 
 // 工具探测使用中性、易被真实调用的工具名（避免 'Do not call' 之类触发模型主动拒绝）
 export const TOOLS_PROBE_NAME = 'get_current_time';

@@ -194,6 +194,53 @@ export interface ProtocolAdapter {
   recognizes(payload: unknown): boolean;
   parseModels(payload: unknown): DiscoveredModel[];
   buildValidationRequest(modelId: string, capability: CapabilityKey): AdapterRequest | AdapterRequest[] | null;
+  /**
+   * 合并探测计划：一组请求产出多个能力结论，替代“一个能力一次请求”。
+   * 未实现该方法的协议继续使用 buildValidationRequest 的逐能力路径。
+   */
+  buildProbePlan?(modelId: string, capabilities: CapabilityKey[]): ProbePlan | null;
+}
+
+// 单次探测请求的观测结果：成功带响应，失败带 HTTP 状态与错误分类。
+// 评估函数是纯函数，因此这些观测可以在没有网络的情况下构造与断言
+export interface ProbeOutcome {
+  ok: boolean;
+  status?: number;
+  data?: unknown;
+  headers?: Record<string, string>;
+  errorType?: ProbeErrorType;
+  errorMessage?: string;
+  durationMs?: number;
+}
+
+export type ProbeOutcomes = Record<string, ProbeOutcome>;
+
+export interface ProbeVerdict {
+  value: 'supported' | 'unsupported' | 'unknown';
+  confidence: 'high' | 'medium' | 'unknown';
+  detail: string;
+  /** 默认 validated；由其他证据推导出的结论（如 json 模式由严格 schema 推导）标记为 inferred */
+  source?: EvidenceSource;
+}
+
+export interface ProbeSlot {
+  name: string;
+  request: AdapterRequest;
+}
+
+export interface ProbeGroup {
+  id: string;
+  capabilities: CapabilityKey[];
+  slots: ProbeSlot[];
+  /** 只有第一阶段的观测才能决定是否升级；升级请求本身不再二次升级 */
+  escalate?: (outcomes: ProbeOutcomes) => ProbeSlot[];
+  evaluate: (outcomes: ProbeOutcomes) => Partial<Record<CapabilityKey, ProbeVerdict>>;
+}
+
+export interface ProbePlan {
+  groups: ProbeGroup[];
+  /** 名称真实性校验用的最小请求（虚假模型名） */
+  nameProbe?: AdapterRequest;
 }
 
 export interface ProxyRequest {

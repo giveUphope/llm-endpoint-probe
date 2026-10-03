@@ -3,9 +3,6 @@ import {
   ENDPOINT_TYPE_PROTOCOL,
   GENERATION_INTERFACE_TYPES,
   PROBE_FAKE_MODEL_ID,
-  DEFAULT_STOP_SEQUENCE,
-  STOP_PROBE_WORD,
-  STOP_PROBE_POST,
   TOOLS_PROBE_NAME,
   buildGenerationProbe,
   classifyGenerationShape,
@@ -15,6 +12,22 @@ import {
   sameModelName,
   type GenerationShape,
 } from '../adapters/shared';
+import {
+  conformsToOkSchema,
+  contentText,
+  evaluateStopFromOutcome,
+  hasReasoningContent,
+  hasToolCall,
+  interpretExplicitRejection,
+  isEventStream,
+  parsesAsJsonObject,
+  visibleText,
+  type ProbeGroup,
+  type ProbeOutcome as SlotOutcome,
+  type ProbeOutcomes,
+  type ProbeSlot,
+  type ProbeVerdict,
+} from '../adapters/probe';
 import { capabilityKeys, evidence, modelConfidence } from '../domain/capabilities';
 import type {
   AdapterRequest,
@@ -24,6 +37,7 @@ import type {
   DiscoveryStep,
   DiscoveredModel,
   EndpointProfile,
+  EvidenceSource,
   GenerationCheck,
   GenerationInterfaceCheck,
   ModelNameCheck,
@@ -38,6 +52,8 @@ import { buildPreview } from '../lib/preview';
 import { canValidateWithoutKey, detectProvider } from '../lib/providers';
 import { uid } from '../lib/profile';
 import { authorizeEndpoint, ProbeError, proxyRequest } from './proxy';
+
+export { interpretExplicitRejection };
 
 const stepDefinitions = [
   ['connectivity', '连通性检查'],
@@ -63,154 +79,17 @@ function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
 }
 
-function outputContent(data: unknown): unknown {
-  const root = record(data);
-  const choices = Array.isArray(root?.choices) ? root.choices : [];
-  const firstChoice = record(choices[0]);
-  const message = record(firstChoice?.message) ?? record(root?.message);
-  if (message?.content != null) return message.content;
-  // Completion 接口与部分兼容实现会把文本直接放在 choices[0].text
-  if (typeof firstChoice?.text === 'string') return firstChoice.text;
-  const candidates = Array.isArray(root?.candidates) ? root.candidates : [];
-  const candidateParts = Array.isArray(record(record(candidates[0])?.content)?.parts)
-    ? record(record(candidates[0])?.content)?.parts as unknown[]
-    : [];
-  if (candidateParts.length) return candidateParts;
-  if (typeof root?.output_text === 'string') return root.output_text;
-  if (typeof root?.generated_text === 'string') return root.generated_text;
-  if (typeof root?.text === 'string') return root.text;
-  const output = Array.isArray(root?.output) ? root.output : [];
-  for (const item of output) {
-    const content = Array.isArray(record(item)?.content) ? record(item)?.content as unknown[] : [];
-    for (const part of content) {
-      const text = record(part)?.text;
-      if (typeof text === 'string') return text;
-    }
-  }
-  // 部分 reasoning 优先的模型（如 SenseNova）把全部生成写入 message.reasoning，从不写 content；
-  // 此时 reasoning 是唯一的可见输出，双探测与 stop 检测需以它为依据
-  if (typeof message?.reasoning === 'string' && message.reasoning.trim()) return message.reasoning;
-  return undefined;
-}
-
-function hasToolCall(data: unknown): boolean {
-  const root = record(data);
-  const choices = Array.isArray(root?.choices) ? root.choices : [];
-  const message = record(record(choices[0])?.message) ?? record(root?.message);
-  if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) return true;
-  const candidates = Array.isArray(root?.candidates) ? root.candidates : [];
-  const candidateParts = Array.isArray(record(record(candidates[0])?.content)?.parts)
-    ? record(record(candidates[0])?.content)?.parts as unknown[]
-    : [];
-  if (candidateParts.some((item) => Boolean(record(item)?.functionCall))) return true;
-  const content = Array.isArray(root?.content) ? root.content : [];
-  const output = Array.isArray(root?.output) ? root.output : [];
-  return [...content, ...output].some((item) => ['tool_use', 'function_call'].includes(String(record(item)?.type)));
-}
-
-// 弱信号：回应（含 reasoning）中提及探测工具名，说明端点处理了工具选择；
-// 这比真正的 tool_calls 弱，但强于“参数可能被忽略”，专门覆盖只把输出写进 reasoning 的模型
+// 弱信号：回应（含推理通道）中提及探测工具名，说明端点处理了工具选择；
+// 这比真正的 tool_calls 弱，但强于“参数可能被忽略”，专门覆盖只把输出写进推理通道的模型。
+// 仅当探测提示词本身不含工具名时成立（Chat 与 Responses 的探测提示词都满足）
 function mentionsToolInvocation(data: unknown, toolName: string): boolean {
-  const text = extractResponseText(data);
-  return typeof text === 'string' && text.includes(toolName);
-}
-
-function isJsonOutput(data: unknown): boolean {
-  const content = outputContent(data);
-  const text = typeof content === 'string'
-    ? content
-    : Array.isArray(content) ? content.map((item) => typeof item === 'string' ? item : String(record(item)?.text ?? '')).join('') : '';
-  if (!text) return false;
-  try { const parsed = JSON.parse(text); return Boolean(parsed); } catch { /* fall through to embedded extraction */ }
-  // reasoning-only 模型（如 SenseNova）会把目标 JSON 构造过程写进推理文本，
-  // 整体不是合法 JSON，但其中包含可解析的目标对象；提取后重试
-  return /\{[^{}]*\}/.test(text) && (Array.from(text.matchAll(/\{[^{}]*\}/g))
-    .some((match) => { try { const p = JSON.parse(match[0]); return p && typeof p === 'object'; } catch { return false; } }));
-}
-
-// 检查响应中是否存在推理/思考痕迹：OpenAI 的 reasoning_content / thinking_blocks，
-// Anthropic 的 thinking，Gemini 的 thinking；存在则证明推理参数实际生效
-function hasReasoningContent(data: unknown): boolean {
-  const root = record(data);
-  if (root?.thinking != null && root.thinking !== '') return true;
-  const choices = Array.isArray(root?.choices) ? root.choices : [];
-  const message = record(record(choices[0])?.message) ?? record(root?.message);
-  if (typeof message?.reasoning_content === 'string' && message.reasoning_content.trim()) return true;
-  if (Array.isArray(message?.thinking_blocks) && message.thinking_blocks.length > 0) return true;
-  if (typeof message?.reasoning === 'string' && message.reasoning.trim()) return true;
-  const candidates = Array.isArray(root?.candidates) ? root.candidates : [];
-  const candidate = candidates[0];
-  if (typeof record(candidate)?.thinking === 'string' && record(candidate)?.thinking) return true;
-  const candidateContent: unknown[] = Array.isArray(record(candidate)?.content) ? (record(candidate)!.content as unknown[]) : [];
-  if (candidateContent.some((item: unknown) => record(item)?.type === 'thinking')) return true;
-  return false;
-}
-
-// 检查响应文本是否包含指定的停止词：若出现则证明 stop 参数未被尊重
-function containsStopSequence(data: unknown, sequence: string): boolean {
-  const content = outputContent(data);
-  if (!content) return false;
-  if (typeof content === 'string') return content.includes(sequence);
-  if (Array.isArray(content)) {
-    return content.some((item: unknown) => {
-      if (typeof item === 'string') return item.includes(sequence);
-      const r = record(item);
-      const text = typeof r?.text === 'string' ? r.text : '';
-      return text.includes(sequence);
-    });
-  }
-  return false;
-}
-
-// 改进流式检测：覆盖标准 SSE、OpenAI Responses API 事件格式以及已缓冲的数组形式
-function isStreamingResponse(response: ProxyResponse): boolean {
-  if (response.headers['content-type']?.includes('text/event-stream')) return true;
-  if (typeof response.data === 'string' && /(^|\n)data:/.test(response.data)) return true;
-  if (typeof response.data === 'string' && /event:|response\.text\.delta/i.test(response.data)) return true;
-  if (Array.isArray(response.data)) {
-    return response.data.some((item) => {
-      const r = record(item);
-      return typeof r?.event === 'string' || typeof r?.type === 'string' || typeof r?.data === 'string';
-    });
-  }
-  return false;
-}
-
-// 提取响应正文文本（用于双探测对比 temperature / top_p / seed）
-function extractResponseText(data: unknown): string {
-  const content = outputContent(data);
-  if (typeof content === 'string') return content.trim();
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === 'string') return item;
-        const r = record(item);
-        return typeof r?.text === 'string' ? r.text : '';
-      })
-      .join('')
-      .trim();
-  }
-  return '';
-}
-
-// 结构化输出 schema 一致性校验：要求响应 JSON 包含 schema 声明的 ok: boolean 字段；
-// 仅返回可解析 JSON 不足以证明 schema 约束实际生效
-function hasStructuredOutputSchemaConformance(data: unknown): boolean {
-  const content = outputContent(data);
-  const text = typeof content === 'string'
-    ? content
-    : Array.isArray(content) ? content.map((item) => typeof item === 'string' ? item : String(record(item)?.text ?? '')).join('') : '';
-  if (!text) return false;
-  try {
-    const parsed = JSON.parse(text);
-    return typeof parsed?.ok === 'boolean';
-  } catch { return false; }
+  return visibleText(data).text.includes(toolName);
 }
 
 // 双探测比较：temperature / top_p 用不同参数值发两次请求，seed 用相同 seed 发两次请求
 // temperature/top_p：输出不同→参数生效；seed：输出相同→随机种子生效
-function evaluateDualProbe(capability: CapabilityKey, responses: ProxyResponse[]): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
-  const outputs = responses.map((response) => extractResponseText(response.data));
+function evaluateDualProbe(capability: CapabilityKey, responses: ProxyResponse[]): ProbeVerdict {
+  const outputs = responses.map((response) => visibleText(response.data).text);
   const nonEmpty = outputs.filter((text) => text.length > 0);
   if (nonEmpty.length < 2) {
     if (nonEmpty.length === 0) {
@@ -338,6 +217,39 @@ export function modelGenerationInterfaces(model: DiscoveredModel): string[] {
   return (model.endpointTypes ?? []).filter((type) => probeable.includes(type));
 }
 
+export interface ProbeEstimate {
+  chat: number;
+  generation: number;
+  total: number;
+  /** 合并探测：请求数与勾选的能力数量不再成线性关系 */
+  merged: boolean;
+}
+
+// 请求数预估必须由探测计划本身推导，不能在 UI 里另写一套算法：
+// 合并探测下“勾 5 个能力”与“勾 9 个能力”可能都是同样的 8 次请求，
+// 而失败升级（400 后的单参数回退、思考吃满预算后的重试）不计入预估，只在结果里如实呈现
+export function estimateProbeRequests(model: DiscoveredModel, capabilities: CapabilityKey[]): ProbeEstimate {
+  const chatInterfaces = modelInterfaces(model);
+  let chat = 0;
+  let merged = false;
+  for (const interfaceKey of chatInterfaces) {
+    const adapter = adapterFor(INTERFACE_PROTOCOL[interfaceKey] ?? model.protocol);
+    const plan = adapter.buildProbePlan?.(model.id, capabilities);
+    if (plan) {
+      merged = true;
+      chat += plan.groups.reduce((sum, group) => sum + group.slots.length, 0) + (plan.nameProbe ? 1 : 0);
+      continue;
+    }
+    for (const capability of capabilities) {
+      const requests = adapter.buildValidationRequest(model.id, capability);
+      chat += Array.isArray(requests) ? requests.length : requests ? 1 : 0;
+    }
+    if (adapter.buildValidationRequest(PROBE_FAKE_MODEL_ID, 'supportsTemperature')) chat += 1;
+  }
+  const generation = modelGenerationInterfaces(model).length * 2;
+  return { chat, generation, total: chat + generation, merged };
+}
+
 export function buildNameCheck(
   requestedId: string,
   echoes: string[],
@@ -381,12 +293,13 @@ export function aggregateProbe(outcomes: Array<{ accepted?: boolean; rejection?:
   return { accepted: undefined };
 }
 
-// 默认探测使用的停止词；若出现在响应中则证明 stop 参数未被尊重
-
-export function evaluateValidation(capability: CapabilityKey, response: ProxyResponse | ProxyResponse[]): { value: 'supported' | 'unknown'; confidence: 'high' | 'medium'; detail: string } {
+// 逐能力验证的判定（未提供合并探测计划的协议仍走这条路）。
+// 内容类观测（工具调用 / JSON / 结构化输出）只认内容通道：推理文本里出现 JSON
+// 只说明模型想到了 JSON，不能说明服务端施加了约束
+export function evaluateValidation(capability: CapabilityKey, response: ProxyResponse | ProxyResponse[]): ProbeVerdict {
   // 结构化输出支持“严格 schema + 基础 json_object 回退”双请求：任一命中即支持
   if (capability === 'supportsStructuredOutput' && Array.isArray(response) && response.length >= 2) {
-    const hit = response.some((resp) => hasStructuredOutputSchemaConformance(resp.data));
+    const hit = response.some((resp) => conformsToOkSchema(contentText(resp.data)));
     return hit
       ? { value: 'supported', confidence: 'high', detail: '请求成功并观察到符合 schema 的结构化输出' }
       : { value: 'unknown', confidence: 'medium', detail: '请求成功，但严格 schema 与基础 JSON 回退均未返回符合结构的输出' };
@@ -394,28 +307,17 @@ export function evaluateValidation(capability: CapabilityKey, response: ProxyRes
   if (Array.isArray(response) && response.length >= 2) return evaluateDualProbe(capability, response);
   const single = Array.isArray(response) ? response[0] : response;
   if (!single) return { value: 'unknown', confidence: 'medium', detail: '未收到探测响应' };
+  if (capability === 'supportsStop') {
+    return evaluateStopFromOutcome({ ok: single.ok, status: single.status, data: single.data, headers: single.headers });
+  }
   let observed = false;
   if (capability === 'supportsTools') observed = hasToolCall(single.data);
-  else if (capability === 'supportsJsonMode') observed = isJsonOutput(single.data);
-  else if (capability === 'supportsStructuredOutput') observed = hasStructuredOutputSchemaConformance(single.data);
-  else if (capability === 'supportsStreaming') observed = isStreamingResponse(single);
+  else if (capability === 'supportsJsonMode') observed = parsesAsJsonObject(contentText(single.data));
+  else if (capability === 'supportsStructuredOutput') observed = conformsToOkSchema(contentText(single.data));
+  else if (capability === 'supportsStreaming') observed = isEventStream({ ok: single.ok, status: single.status, data: single.data, headers: single.headers });
   else if (capability === 'supportsReasoning') observed = hasReasoningContent(single.data);
-  else if (capability === 'supportsStop') {
-    const text = extractResponseText(single.data);
-    if (typeof text !== 'string' || text.length === 0) {
-      return { value: 'unknown', confidence: 'medium', detail: '响应输出为空：无法判断 stop 参数是否生效' };
-    }
-    const reachedStop = text.includes(STOP_PROBE_WORD);
-    const continuedAfterStop = text.includes(STOP_PROBE_POST);
-    if (!reachedStop) {
-      return { value: 'unknown', confidence: 'medium', detail: '输出未到达停止词：响应过短，无法确认 stop 参数是否生效' };
-    }
-    return continuedAfterStop
-      ? { value: 'unknown', confidence: 'medium', detail: '输出在停止词之后继续生成：stop 参数未生效' }
-      : { value: 'supported', confidence: 'medium', detail: '输出在停止词处终止：stop 参数生效' };
-  }
   else return { value: 'unknown', confidence: 'medium', detail: '服务端接受了参数，但单次最小请求无法确认参数是否实际生效' };
-  // tools 的弱信号：output/reasoning 中提及探测工具名，说明端点处理了工具选择（比忽略强，比真正调用弱）
+  // tools 的弱信号：输出（含推理通道）中提及探测工具名，说明端点处理了工具选择（比忽略强，比真正调用弱）
   if (capability === 'supportsTools' && !observed && mentionsToolInvocation(single.data, TOOLS_PROBE_NAME)) {
     return { value: 'supported', confidence: 'medium', detail: '响应中提及探测工具名，说明端点处理了工具选择但未产生 tool_calls 数组' };
   }
@@ -426,9 +328,9 @@ export function evaluateValidation(capability: CapabilityKey, response: ProxyRes
 
 export function mergeValidationEvidence(
   previous: CapabilityStatus,
-  result: { value: 'supported' | 'unsupported' | 'unknown'; confidence: 'high' | 'medium' | 'unknown'; detail: string },
+  result: { value: 'supported' | 'unsupported' | 'unknown'; confidence: 'high' | 'medium' | 'unknown'; detail: string; source?: EvidenceSource },
 ): CapabilityStatus {
-  const item = evidence('validated', result.confidence, result.detail);
+  const item = evidence(result.source ?? 'validated', result.confidence, result.detail);
   // 验证产出真实证据后，移除能力矩阵里陈旧的“尚未探测”占位
   const retained = previous.evidence.filter((entry) => entry.source !== 'unknown' || entry.detail !== '尚未探测');
   if (result.value === 'unknown' && previous.value !== 'unknown') {
@@ -437,29 +339,8 @@ export function mergeValidationEvidence(
   return { value: result.value, evidence: [...retained, item] };
 }
 
-// 把“服务端明确拒绝参数”的原始报错按能力语义解释：
-// 拒绝强制工具选择不代表工具不可用；提示词缺 json 字样不代表 json 模式不可用；
-// response_format 类型不可用才是结构化输出不支持的直接证据
-export function interpretExplicitRejection(
-  capability: CapabilityKey,
-  message: string,
-  interfaceNote = '',
-): { value: 'unsupported' | 'unknown'; confidence: 'high' | 'medium' | 'unknown'; detail: string } {
-  if (capability === 'supportsTools' && /tool_choice|强制|forced/i.test(message)) {
-    return { value: 'unknown', confidence: 'medium', detail: `服务端拒绝强制工具选择（提示改用 tool_choice=auto）：工具能力可能仍受支持，但无法用强制选择方式确认${interfaceNote}` };
-  }
-  if (capability === 'supportsJsonMode' && /prompt|must contain|json.*word|json 字样/i.test(message)) {
-    return { value: 'unknown', confidence: 'medium', detail: `服务端拒绝原因为提示词未包含 json 字样（OpenAI 约束）：response_format=json_object 是否受支持未能确认${interfaceNote}` };
-  }
-  if (capability === 'supportsStructuredOutput' && /unavailable/i.test(message)) {
-    return { value: 'unsupported', confidence: 'medium', detail: `服务端返回 response_format 类型不可用：当前模型或上游暂不支持结构化输出${interfaceNote}` };
-  }
-  if (capability === 'supportsStructuredOutput' && /xgrammar|compile_grammar_error|guided_grammar/i.test(message)) {
-    return { value: 'unknown', confidence: 'medium', detail: `服务端 grammar 编译依赖缺失（xgrammar）：结构化输出能力可能受支持但服务端配置不完整，请安装 xgrammar 后重试${interfaceNote}` };
-  }
-  return { value: 'unsupported', confidence: 'medium', detail: `服务端明确拒绝参数${interfaceNote}：${message}` };
-}
-
+// 拒绝语义解释（interpretExplicitRejection）已随合并探测评估一起移到 adapters/probe.ts，
+// 这里保留同名再导出，旧的引用方无需改动
 type RunUpdate = (run: DiscoveryRun) => void;
 
 function updateStep(run: DiscoveryRun, id: string, patch: Partial<DiscoveryStep>): void {
@@ -555,9 +436,12 @@ export async function discover(
       throw new ProbeError('baseURL 无效，请包含 http:// 或 https://', 'invalid_url');
     }
     profile = { ...profile, baseURL: submittedURL };
-    const automaticProtocol = profile.protocol === 'auto';
     const authorization = await authorizeEndpoint(profile, signal);
     profile = authorization.profile;
+    // 自动识别必须依据“授权后实际生效的协议”：服务端会用 URL 规则与厂商预设改写协议，
+    // 若沿用授权前的值，就会出现“候选列表按 auto 展开、识别分支却按手动协议跳过 recognizes”
+    // 的错配——那样列表里第一个适配器（gemini）会被无条件采纳
+    const automaticProtocol = profile.protocol === 'auto';
     run.endpointName = profile.name;
     run.endpointBaseURL = profile.baseURL;
     run.endpointQueryParams = profile.queryParams;
@@ -600,11 +484,8 @@ export async function discover(
     }
 
     updateStep(run, 'protocol', { status: 'running', startedAt: new Date().toISOString() });
-    const fallbackCandidates = adapterCandidates(automaticProtocol ? 'auto' : profile.protocol);
-    const preferredAdapter = automaticProtocol && provider ? adapterFor(profile.protocol) : undefined;
-    const candidates = preferredAdapter
-      ? [preferredAdapter, ...fallbackCandidates.filter((item) => item.id !== preferredAdapter.id)]
-      : fallbackCandidates;
+    // 授权后协议已由服务端解析：'auto' 才需要逐个候选试探，否则只跑被指定的那一个
+    const candidates = adapterCandidates(automaticProtocol ? 'auto' : profile.protocol);
     let selected: ProtocolAdapter | undefined;
     let payload: unknown;
     let lastDiscoveryError: ProbeError | undefined;
@@ -799,6 +680,48 @@ export function planAutoValidation(input: {
   return { targets: pending, blocked: [] };
 }
 
+// 执行一个合并探测组：先并发跑第一阶段槽位，再按第一阶段结果决定是否升级（如 400 后的单参数回退）。
+// 观测结果一律转成数据而不是异常，交给纯函数评估；只有取消继续向上抛出
+async function runProbeGroup(
+  run: DiscoveryRun,
+  endpointToken: string,
+  profile: EndpointProfile,
+  group: ProbeGroup,
+  signal: AbortSignal,
+  onRequest?: (request: RequestRecord) => void,
+): Promise<ProbeOutcomes> {
+  const outcomes = await runSlots(group.slots);
+  const followUps = group.escalate?.(outcomes) ?? [];
+  if (followUps.length) Object.assign(outcomes, await runSlots(followUps));
+  return outcomes;
+
+  async function runSlots(slots: ProbeSlot[]): Promise<ProbeOutcomes> {
+    const settled = await Promise.allSettled(slots.map(async (slot) => {
+      try {
+        const response = await makeRequest(run, 'capabilities', endpointToken, profile, slot.request, signal, () => {
+          const latest = run.requests.at(-1);
+          if (latest) onRequest?.(structuredClone(latest));
+        });
+        return { name: slot.name, outcome: { ok: true, status: response.status, data: response.data, headers: response.headers } as SlotOutcome };
+      } catch (error) {
+        if (error instanceof ProbeError && error.type === 'cancelled') throw error;
+        const probe = error instanceof ProbeError ? error : new ProbeError('探测失败', 'network');
+        return {
+          name: slot.name,
+          outcome: { ok: false, status: probe.status, data: probe.details, errorType: probe.type, errorMessage: probe.message } as SlotOutcome,
+        };
+      }
+    }));
+    const cancelled = settled.find((item): item is PromiseRejectedResult => item.status === 'rejected');
+    if (cancelled) throw cancelled.reason;
+    const collected: ProbeOutcomes = {};
+    for (const item of settled) {
+      if (item.status === 'fulfilled') collected[item.value.name] = item.value.outcome;
+    }
+    return collected;
+  }
+}
+
 export async function validateModel(
   profile: EndpointProfile,
   model: DiscoveredModel,
@@ -832,6 +755,40 @@ export async function validateModel(
     for (const interfaceKey of chatInterfaces) {
       const adapter = adapterFor(INTERFACE_PROTOCOL[interfaceKey] ?? model.protocol);
       const interfaceNote = chatInterfaces.length > 1 ? `（${interfaceLabel(interfaceKey)}）` : '';
+      const plan = adapter.buildProbePlan?.(model.id, capabilities) ?? null;
+      if (plan) {
+        // 合并探测：一组请求产出多个能力结论，请求数从“每能力 1~2 次”降到典型 7 次。
+        // 计划未覆盖的能力（如 supportsPromptCache）保留“无可用的最小验证方法”占位
+        const covered = new Set(plan.groups.flatMap((group) => group.capabilities));
+        for (const capability of capabilities) {
+          if (covered.has(capability)) continue;
+          next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], {
+            value: 'unknown', confidence: 'unknown', detail: `当前协议没有安全的最小验证方法${interfaceNote}`,
+          });
+        }
+        for (const group of plan.groups) {
+          jobs.push(async () => {
+            const outcomes = await runProbeGroup(run, endpointToken, profile, group, signal, onRequest);
+            const verdicts = group.evaluate(outcomes);
+            for (const capability of group.capabilities) {
+              const verdict = verdicts[capability]
+                ?? { value: 'unknown' as const, confidence: 'unknown' as const, detail: '合并探测组未给出该能力的结论' };
+              next.capabilities[capability] = mergeValidationEvidence(next.capabilities[capability], {
+                ...verdict, detail: `${verdict.detail}${interfaceNote}`,
+              });
+            }
+          });
+        }
+        // 名称真实性探测：计划给出最小请求，不再复用 256 token 的采样请求
+        const nameProbe = plan.nameProbe;
+        if (nameProbe) {
+          jobs.push(async () => {
+            const outcome = await probeOnce(run, endpointToken, profile, nameProbe, signal, onRequest);
+            if (outcome.accepted !== undefined || outcome.rejection) probeOutcomes.push({ accepted: outcome.accepted, rejection: outcome.rejection });
+          });
+        }
+        continue;
+      }
       for (const capability of capabilities) {
         jobs.push(async () => {
           const requests = adapter.buildValidationRequest(model.id, capability);

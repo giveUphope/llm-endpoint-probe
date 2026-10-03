@@ -11,7 +11,7 @@ import { createProfile, uid } from './lib/profile';
 import { canValidateWithoutKey, detectProvider } from './lib/providers';
 import { normalizeApiKey } from './lib/security';
 import { createSampleRun } from './lib/sample';
-import { discover, modelGenerationInterfaces, modelProbeInterfaces, validateModel } from './services/discovery';
+import { discover, validateModel } from './services/discovery';
 import { checkProxyHealth, clearEndpointHistory, listEndpointHistory, restoreEndpointHistory, type EndpointHistoryItem } from './services/proxy';
 import { fetchReferenceCatalog, type ReferenceState } from './services/reference';
 
@@ -314,7 +314,7 @@ export default function App() {
       </main>
       {selectedModel && <ModelDetail model={selectedModel} requests={run?.requests ?? []} onClose={() => setSelectedId(undefined)} onValidate={() => setValidationModel(selectedModel)} reference={reference} onRetryReference={() => { referenceRequested.current = true; void loadReference(); }} />}
     </div>
-    {validationModel && <ValidationDialog modelName={validationModel.displayName} interfaces={modelProbeInterfaces(validationModel).length} generationInterfaces={modelGenerationInterfaces(validationModel).length} onClose={() => setValidationModel(undefined)} onStart={runValidation} />}
+    {validationModel && <ValidationDialog model={validationModel} onClose={() => setValidationModel(undefined)} onStart={runValidation} />}
     {toast && <div className="toast"><Activity size={15} />{toast}</div>}
   </div>;
 }
